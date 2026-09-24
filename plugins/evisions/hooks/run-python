@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fail-closed launcher for the evisions plugin's Python hooks.
+#
+# Why it exists: Claude Code treats a hook that cannot start (a missing interpreter, a missing script)
+# as a non-blocking error, so a safety gate registered as `python3 hook.py` fails OPEN, silently, on
+# any machine without a working python3. That is common on Windows, where `python3` is often absent
+# or a Microsoft Store stub that is found on PATH but only prints an install hint. This launcher needs
+# nothing but bash, which runs every hook anyway (Git Bash on Windows), and no external command before
+# the exec, so a stripped PATH cannot break it. It runs the script with the first interpreter that
+# really runs Python 3.9+, and when it cannot run the check at all it exits 2: that blocks the tool
+# call and tells Claude why, instead of letting the call through unchecked.
+#
+# Usage: run-python <script> [args...]
+#   <script> is absolute, or relative to the plugin root (for example hooks/bash_safety.py).
+#   stdin, stdout, stderr and the script's exit code pass through unchanged (exec).
+
+# Backslashes to slashes first: on Windows the plugin root can arrive as C:\...\hooks\run-python, and
+# Git Bash accepts C:/... paths.
+self="${BASH_SOURCE[0]:-$0}"
+self="${self//\\//}"
+case "$self" in
+    */*) self_dir="${self%/*}" ;;
+    *) self_dir="." ;;
+esac
+PLUGIN_ROOT="$(cd "${self_dir}/.." 2>/dev/null && pwd)"
+
+# Block the tool call with a message Claude relays to the user. $1 says what went wrong, $2 what
+# lifts the block.
+fail() {
+    printf 'evisions safety: the safety check could not run because %s The tool call is blocked until %s. Tell the user this in plain words and do not try to work around it: nothing may run unchecked while the safety check is down.\n' "$1" "$2" >&2
+    exit 2
+}
+
+script="${1:-}"
+[ -n "$script" ] || fail "no script was named." "the plugin is updated or reinstalled"
+shift
+case "$script" in
+    /* | [A-Za-z]:[\\/]*) ;;
+    *) script="${PLUGIN_ROOT}/${script}" ;;
+esac
+[ -f "$script" ] || fail "its script is missing (${script})." "the plugin is updated or reinstalled"
+
+# --- interpreter search: keep identical in hooks/run-python, hooks/safety-start, bin/list-env-keys ---
+# Sets PYTHON to the first interpreter that really runs Python 3.9 or newer. Each candidate is
+# executed, not just located: on Windows `python3` is often a Microsoft Store stub that is found on
+# PATH but only prints an install hint, and an older Python cannot run the plugin's scripts. The probe
+# reads /dev/null so it never consumes the hook input waiting on stdin. The probe and the scripts run
+# with -S (no site module): the scripts use only the standard library, and skipping site saves
+# startup time on every tool call and keeps a user's sitecustomize out of the safety check.
+try_python() {
+    command -v "$1" >/dev/null 2>&1 &&
+        "$@" -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' </dev/null >/dev/null 2>&1
+}
+find_python() {
+    if try_python python3; then
+        PYTHON=(python3)
+    elif try_python python; then
+        PYTHON=(python)
+    elif try_python py -3; then
+        PYTHON=(py -3)
+    else
+        return 1
+    fi
+}
+# --- end of interpreter search ---
+
+find_python || fail "Python 3 (3.9 or newer) was not found; tried python3, python and py -3." "Python 3 is installed"
+
+# With execfail a failed exec returns here instead of ending the shell with a non-blocking error.
+shopt -s execfail
+exec "${PYTHON[@]}" -S "$script" "$@"
+fail "starting ${PYTHON[*]} failed." "Python 3 works again"

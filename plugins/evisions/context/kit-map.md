@@ -17,6 +17,11 @@ below fits, work normally.
 | an existing prompt checked ("zkontroluj prompt") | skill `evisions:prompt-eval` (static sanity check) |
 | research: how others do X, options compared, a claim verified ("udělej research") | journals first if missing (hard rule), then skill `evisions:research`; it picks `evisions:research-analyst` (one angle) or `evisions:research-lead` (several) |
 | their own idea or direction thought through ("potřebuju si to promyslet", "rozviň můj nápad") | skill `evisions:socratic-brainstormer`: questions that develop their thinking, not your answer |
+| requirements for something to be built ("napiš PRD", "sepiš zadání") | skill `evisions:prd`: the WHAT and WHY; HOW to build it comes after (companion rows below) |
+| code reviewed ("udělej review", "zreviewuj to") | agent `evisions:code-reviewer`; for code AND security also `evisions:security-auditor`, both in parallel. Pass the scope and the user's language |
+| a security review ("je to bezpečné?", "security audit") | agent `evisions:security-auditor`, with the scope and the user's language |
+| a bug or tech debt noticed along the way ("zapiš bug", "log tech debt") | a `BUG-TODO:` or `DEBT-TODO:` line per the documentation standard; to write the entry now, skill `evisions:bug-log` or `evisions:tech-debt-log` |
+| a third-party skill or plugin checked before installing ("můžu to nainstalovat?") | skill `evisions:skill-scanner`: a static check that never installs or runs the target |
 
 ## Companion plugins (if installed)
 
@@ -28,6 +33,7 @@ without it.
 | a software build heading to implementation | `superpowers:brainstorming`, then `superpowers:writing-plans` (their own idea or direction stays with `evisions:socratic-brainstormer`) |
 | a finished plan validated before execution | `/replan` (skill `replan:replan`) |
 | an implementation checked against its plan | `/recheck` (skill `replan:recheck`) |
+| a bug, failing test or unexpected behaviour, before any fix | `superpowers:systematic-debugging` |
 | a plan or decision grilled by hard questions ("grill me", "rozgriluj to") | the grilling skill (`grill me`) |
 
 </kit_map>

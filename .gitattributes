@@ -1,7 +1,8 @@
 # Force LF so a Windows checkout (core.autocrlf=true) cannot break the hook's shebang or the scripts.
 * text=auto eol=lf
-plugins/evisions/hooks/session-start text eol=lf
 *.sh text eol=lf
 *.py text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+plugins/evisions/hooks/* text eol=lf
+plugins/evisions/bin/* text eol=lf

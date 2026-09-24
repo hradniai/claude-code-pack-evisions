@@ -40,6 +40,7 @@ this work needs journals at all) before creating anything.
 | `worklog.md` | History, append-only: entry table on top, dated prose below, both newest first. |
 | `docs/decision-log.md` | Directional decisions below the ADR bar, one row each, plus a pointer row per ADR. Append-only. |
 | `docs/decisions/NNNN-kebab-title.md` | ADRs, one decision each. |
+| `BUGS.md`, `TECH-DEBT.md` | Bugs and tech debt found along the way, newest first, written by `evisions:bug-log` and `evisions:tech-debt-log`. |
 | `docs/features/` (or an existing root `features/`) | Feature docs, kept by the `evisions:features-documenter` agent. |
 | `research/` | Research files, written by `evisions:research`. |
 | `prompts/` | Prompt files, written by `evisions:prompt-engineer`. |
@@ -54,7 +55,7 @@ Last updated: YYYY-MM-DD HH:MM
 ## Focus                <- what is being worked on now, one or two lines
 ## Current state        <- where things stand, what works, what blocks
 ## Next                 <- the next concrete steps
-## Pending docs         <- DECISION-TODO: / ADR-TODO: capture lines
+## Pending docs         <- capture lines: DECISION-TODO: / ADR-TODO: / BUG-TODO: / DEBT-TODO:
 ```
 
 ```
@@ -86,8 +87,14 @@ written after this conversation is gone, marked `(unconfirmed)` when the user ha
 - `DECISION-TODO: <decision> - why: <their reason or "not stated"> - rejected: <alternatives> - where: <file or topic>`
 - `ADR-TODO:` the same fields, for a decision that clears the ADR bar.
 
-Do not stop the work for it. `/end` proposes these for approval; each written line is then rewritten
-into a pointer to what was written, the only sanctioned rewrite of a capture line.
+Broken behaviour or costly code noticed while doing something else gets one line too, not a fix on the
+spot (a detour derails the task; a defect in what the task itself depends on is part of the task):
+- `BUG-TODO: <observed vs expected> - where: <file:line or feature> - found while: <what you were doing>`
+- `DEBT-TODO: <what works but is costly or risky> - where: <...> - found while: <...>`
+
+Do not stop the work for it. `/end` proposes decision lines for approval and writes bug and debt lines
+without asking; each written line is then rewritten into a pointer to what was written, the only
+sanctioned rewrite of a capture line.
 
 ## When to write
 
@@ -97,8 +104,8 @@ into a pointer to what was written, the only sanctioned rewrite of a capture lin
 4. Before telling the user something is done: WORKSTATE reflects reality.
 5. `/checkpoint` (`evisions:checkpoint`): one worklog entry, a refreshed WORKSTATE, a local commit of
    the touched paths. Never pushes.
-6. `/end` (`evisions:end`): proposes decisions for approval, writes the journals, syncs feature docs,
-   commits locally and asks before any push.
+6. `/end` (`evisions:end`): proposes decisions for approval, writes the journals and the captured bugs
+   and debt, syncs feature docs, commits locally and asks before any push.
 
 <bottom_line>
 Environment rules on file locations win. Journals exist from the first edit on. WORKSTATE is live state;

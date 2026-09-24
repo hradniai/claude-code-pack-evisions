@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# list-env-keys: lists the NAMES of credential and API variables, never their values.
+#
+# The invariant, and why: a secret value that enters Claude's context stays in the conversation, its
+# logs and anything written from it. Claude still needs to know which keys exist and whether they are
+# filled, so this tool reports names (and, with --classify, a state such as "empty" or "filled") and
+# never a value. The plugin's safety check lets it run on hard env files for exactly that reason.
+# Names come from `compgen -e` (the shell's own list of exported names) and from the NAME= part of
+# env-file lines; `env | cut` is not used because a multi-line value would leak its continuation lines.
+#
+# Default sources (names only):
+#   1. the process environment
+#   2. ${CLAUDE_CONFIG_DIR:-~/.claude}/.env  (user-level Claude Code env file)
+#   3. ./.env                                 (project env file in the current directory)
+# Or one file only, with --from <path>.
+#
+# Usage:
+#   list-env-keys                          default sources, credential-like names
+#   list-env-keys GEMINI                   filter names by a case-insensitive regex
+#   list-env-keys '.*'                     every name (noisy)
+#   list-env-keys --from path/to/.env      only that file
+#   list-env-keys --from .env --classify   each key's state: empty | placeholder | filled (kind)
+#
+# Exit codes: 0 success (an empty result included), 1 invalid input, missing file or, for --classify,
+# no Python 3.9+.
+
+set -euo pipefail
+
+DEFAULT_INCLUDE='API|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|CLIENT_ID|CLIENT_SECRET|DSN|CONNECTION_STRING|BUCKET|ACCOUNT_ID|PROJECT_ID|TENANT_ID|SUBSCRIPTION_ID|SERVICE_ACCOUNT|PRIVATE_KEY|ACCESS_KEY|REFRESH_TOKEN|SESSION_TOKEN|WEBHOOK|SIGNING|HMAC|SALT|^OPENAI_|^ANTHROPIC_|^GEMINI_|^GROQ_|^MISTRAL_|^TOGETHER_|^XAI_|^DEEPSEEK_|^STRIPE_|^TWILIO_|^SENDGRID_|^MAILGUN_|^GITHUB_TOKEN|^GITLAB_TOKEN|^DATABASE_URL|^SUPABASE_|^FIREBASE_|^AWS_|^AZURE_|^GCP_'
+
+# Names that match the include pattern but are not credentials.
+EXCLUDE='^PWD$|^OLDPWD$|^XPC_|^TMPDIR$|^TERM_PROGRAM|^DISPLAY$|^LSCOLORS$|^LS_COLORS$'
+
+usage() {
+    printf 'Usage: list-env-keys [--from <env-file>] [--classify] [name-regex]\n'
+    printf 'Lists the NAMES of credential variables (never values). --classify adds each key'"'"'s state.\n'
+}
+
+# The real directory of this script, following symlinks, so --classify finds ../scripts/ wherever
+# the plugin's bin/ directory is reached from. Plain readlink (no -f) works on macOS too.
+script_dir() {
+    local source="${BASH_SOURCE[0]:-$0}" dir
+    source="${source//\\//}"
+    while [ -L "$source" ]; do
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        case "$source" in
+            /*) ;;
+            *) source="${dir}/${source}" ;;
+        esac
+    done
+    cd -P "$(dirname "$source")" && pwd
+}
+
+# --- interpreter search: keep identical in hooks/run-python, hooks/safety-start, bin/list-env-keys ---
+# Sets PYTHON to the first interpreter that really runs Python 3.9 or newer. Each candidate is
+# executed, not just located: on Windows `python3` is often a Microsoft Store stub that is found on
+# PATH but only prints an install hint, and an older Python cannot run the plugin's scripts. The probe
+# reads /dev/null so it never consumes the hook input waiting on stdin. The probe and the scripts run
+# with -S (no site module): the scripts use only the standard library, and skipping site saves
+# startup time on every tool call and keeps a user's sitecustomize out of the safety check.
+try_python() {
+    command -v "$1" >/dev/null 2>&1 &&
+        "$@" -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' </dev/null >/dev/null 2>&1
+}
+find_python() {
+    if try_python python3; then
+        PYTHON=(python3)
+    elif try_python python; then
+        PYTHON=(python)
+    elif try_python py -3; then
+        PYTHON=(py -3)
+    else
+        return 1
+    fi
+}
+# --- end of interpreter search ---
+
+TARGET_FILE=""
+CLASSIFY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --from | -f)
+            if [ -z "${2:-}" ]; then
+                echo "list-env-keys: --from requires a path argument" >&2
+                exit 1
+            fi
+            TARGET_FILE="$2"
+            shift 2
+            if [ ! -f "$TARGET_FILE" ]; then
+                echo "list-env-keys: file not found: $TARGET_FILE" >&2
+                exit 1
+            fi
+            ;;
+        --classify | -c)
+            CLASSIFY=1
+            shift
+            ;;
+        --help | -h)
+            usage
+            exit 0
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+PATTERN="${1:-$DEFAULT_INCLUDE}"
+
+# Classify mode: the Python classifier reports each key's value STATE without ever emitting the value.
+if [ "$CLASSIFY" = "1" ]; then
+    CLASSIFY_FILE="${TARGET_FILE:-./.env}"
+    if [ ! -f "$CLASSIFY_FILE" ]; then
+        echo "list-env-keys: file not found: $CLASSIFY_FILE" >&2
+        exit 1
+    fi
+    if ! find_python; then
+        echo "list-env-keys: --classify needs Python 3.9 or newer, which was not found (tried python3, python and py -3). Names without states work without it: run list-env-keys without --classify." >&2
+        exit 1
+    fi
+    exec "${PYTHON[@]}" -S "$(script_dir)/../scripts/env_key_classify.py" "$CLASSIFY_FILE" "$PATTERN"
+fi
+
+# NAME part of NAME=value or export NAME=value lines, in any letter case and with the optional spaces
+# dotenv accepts (`  database_url = ...`); comments, blanks and values are never output.
+names_from_file() {
+    [ -f "$1" ] || return 0
+    grep -E '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' "$1" 2>/dev/null |
+        sed -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/' || true
+}
+
+all_names() {
+    if [ -n "$TARGET_FILE" ]; then
+        names_from_file "$TARGET_FILE"
+    else
+        compgen -e || true
+        names_from_file "${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/.env"
+        names_from_file "./.env"
+    fi
+}
+
+# grep exits 1 when nothing matches, which is still a success; 2 (an invalid regex) stays an error.
+all_names | { grep -iE -e "$PATTERN" || [ $? -eq 1 ]; } | { grep -ivE -e "$EXCLUDE" || [ $? -eq 1 ]; } | sort -u

@@ -1,6 +1,6 @@
 ---
 name: end
-description: Close a work session - first propose the session's decisions (decision-log rows and ADR candidates) for one quick approval, then write the worklog, WORKSTATE and approved decisions, sync feature docs, commit locally and ask before any push. Use when the user types /end or says "končíme", "konec", "uzavři session", "zapiš to a končíme", "wrap up", "end the session".
+description: Close a work session - first propose the session's decisions (decision-log rows and ADR candidates) for one quick approval, then write the worklog, WORKSTATE, approved decisions and the captured bugs and tech debt, sync feature docs, commit locally and ask before any push. Use when the user types /end or says "končíme", "konec", "uzavři session", "zapiš to a končíme", "wrap up", "end the session".
 ---
 
 # /end
@@ -64,7 +64,8 @@ Which should I write? (all / numbers / none)
 ```
 
 Mark anything the user did not state themselves as your inference. Wait for the answer. With no
-candidates, say "No decisions to record." and continue without waiting.
+candidates, say "No decisions to record." and continue without waiting. `BUG-TODO:` and `DEBT-TODO:`
+lines are not proposed: they record observations, not decisions, and Step 3 writes them without asking.
 
 ## Step 3: Write
 
@@ -74,15 +75,19 @@ candidates, say "No decisions to record." and continue without waiting.
 3. Approved ADRs: load the `evisions:adr` skill and write each one in its format, one file per decision.
    The Step 2 approval confirms exactly what was shown, so the skill's triage and provenance checks are
    met; add no reason that was not in the proposal.
-4. Shorten each answered Pending docs line into a pointer, the only sanctioned rewrite of a capture line:
-   written -> `DECISION-TODO: <decision in a few words> (-> docs/decision-log.md D7, <date>)` or
-   `ADR-TODO: <decision in a few words> (-> docs/decisions/0003-<slug>.md, <date>)`; declined ->
+4. Every open `BUG-TODO:` line: load the `evisions:bug-log` skill and write it as an entry in `BUGS.md`;
+   every open `DEBT-TODO:` line: load the `evisions:tech-debt-log` skill and write it into `TECH-DEBT.md`.
+   No approval needed.
+5. Shorten each answered or written Pending docs line into a pointer, the only sanctioned rewrite of a
+   capture line: written -> `DECISION-TODO: <decision in a few words> (-> docs/decision-log.md D7, <date>)`,
+   `ADR-TODO: <decision in a few words> (-> docs/decisions/0003-<slug>.md, <date>)`,
+   `BUG-TODO: <title> (-> BUGS.md, <date>)` or `DEBT-TODO: <title> (-> TECH-DEBT.md, <date>)`; declined ->
    `<prefix> <decision in a few words> (declined <date>)`. A line the user did not answer stays as it is.
-5. `worklog.md`, both newest first: a row `| <timestamp> | end | <one-line session summary> |` directly
+6. `worklog.md`, both newest first: a row `| <timestamp> | end | <one-line session summary> |` directly
    under the table header, and a `### <timestamp> - <what>` block directly under `## Log`: what was done,
    why, files touched, decisions with links, what remains open.
-6. `WORKSTATE.md`: rewrite `Last updated`, Focus, Current state and Next so they describe the state the
-   next session starts from; Pending docs keeps its open lines and the pointers from item 4.
+7. `WORKSTATE.md`: rewrite `Last updated`, Focus, Current state and Next so they describe the state the
+   next session starts from; Pending docs keeps its open lines and the pointers from item 5.
 
 Everything written in this step is in English, whatever language the conversation is in: the user's
 words and reasons are translated faithfully, never embellished; a verbatim quote may stay in the original
@@ -110,7 +115,8 @@ Outside a git repository, skip git and say so once. Inside one:
 ## Step 6: Summary and push question (the second stop)
 
 One short message, in the user's language:
-- **Written:** each file touched, one line each (worklog, WORKSTATE, decision log rows, ADRs, feature docs).
+- **Written:** each file touched, one line each (worklog, WORKSTATE, decision log rows, ADRs, feature
+  docs); new `BUGS.md` and `TECH-DEBT.md` entries one line each, highest severity first.
 - **Git:** the commit subject, or why there is none; paths of changes that were not yours, left unstaged.
 - **Pending:** unanswered candidates and anything the next session must know.
 

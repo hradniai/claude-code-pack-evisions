@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# SessionStart hook of the evisions plugin: injects the safety protocol (context/safety.md) into the
+# session as additionalContext, so Claude knows how to handle a denied or blocked call and how secrets
+# are treated, followed by status lines computed now:
+# - SAFETY STATUS when no working Python 3.9+ exists. The PreToolUse safety check (hooks/run-python)
+#   then blocks every Bash, PowerShell, Read and Grep call, and the user should hear why at the start
+#   of the conversation, not after the first unexplained block.
+# - SETTINGS BASELINE when the optional settings baseline (evisions-settings) was never applied, so
+#   Claude can point to it when the user asks about safety or setup.
+# Plain bash only (no jq, no python) so it runs unchanged on Linux, macOS (bash 3.2) and Git Bash on
+# Windows. It always exits 0 because a failing hook must never block a session: a missing context file
+# becomes a one-line notice instead of an error. Claude Code caps additionalContext at 10,000
+# characters, so everything injected must stay under it (tests/test_safety_start.py checks).
+
+# Backslashes to slashes first: on Windows the plugin root can arrive as C:\...\hooks\safety-start.
+self="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "${self//\\//}")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Print a context file (path relative to the plugin root), or a notice when it is missing.
+read_context() {
+    if [ -r "${PLUGIN_ROOT}/$1" ]; then
+        cat "${PLUGIN_ROOT}/$1"
+    else
+        printf '[evisions] %s is missing from the plugin; update or reinstall the plugin to restore it.' "$1"
+    fi
+}
+
+# Escape a string for a JSON string literal. Each ${s//old/new} is one pass; no '&' appears in a
+# replacement, so bash 5.2+ patsub_replacement cannot alter the result.
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# --- interpreter search: keep identical in hooks/run-python, hooks/safety-start, bin/list-env-keys ---
+# Sets PYTHON to the first interpreter that really runs Python 3.9 or newer. Each candidate is
+# executed, not just located: on Windows `python3` is often a Microsoft Store stub that is found on
+# PATH but only prints an install hint, and an older Python cannot run the plugin's scripts. The probe
+# reads /dev/null so it never consumes the hook input waiting on stdin. The probe and the scripts run
+# with -S (no site module): the scripts use only the standard library, and skipping site saves
+# startup time on every tool call and keeps a user's sitecustomize out of the safety check.
+try_python() {
+    command -v "$1" >/dev/null 2>&1 &&
+        "$@" -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' </dev/null >/dev/null 2>&1
+}
+find_python() {
+    if try_python python3; then
+        PYTHON=(python3)
+    elif try_python python; then
+        PYTHON=(python)
+    elif try_python py -3; then
+        PYTHON=(py -3)
+    else
+        return 1
+    fi
+}
+# --- end of interpreter search ---
+
+# The hook input is not needed; read it so Claude Code never writes into a pipe nobody reads.
+if [ ! -t 0 ]; then
+    cat >/dev/null 2>&1
+fi
+
+status=""
+if ! find_python; then
+    status="${status}
+SAFETY STATUS: Python 3.9+ was not found. The plugin's safety check blocks Bash and file reads until it is installed. Tell the user at the start of the conversation."
+fi
+
+config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
+if [ ! -f "${config_dir}/evisions/settings-applied.json" ]; then
+    status="${status}
+SETTINGS BASELINE: not installed. The user can preview it with \`evisions-settings\` and install it with \`evisions-settings --apply\`. Mention this only if the user asks about safety, permissions or setup."
+fi
+
+protocol="$(read_context context/safety.md)"
+
+context="<evisions_safety>
+${protocol}
+${status}
+</evisions_safety>"
+
+# printf rather than a heredoc, which has been reported to hang hooks under bash 5.3.
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "$(escape_for_json "$context")"
+
+exit 0

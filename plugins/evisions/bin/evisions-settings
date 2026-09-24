@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# evisions-settings: shows, applies, checks or removes the evisions settings baseline in the user's
+# Claude Code settings.json. This wrapper only finds a Python 3.9+ interpreter and runs
+# ../scripts/install_settings.py (resolved from this file's real location) with every argument.
+# Without a flag it is a dry run and writes nothing; --help lists the options.
+# bash 3.2 compatible (macOS), no jq; runs on Linux, macOS and Git Bash on Windows.
+
+# Follow symlinks to the real file (no readlink -f on older macOS).
+source_path="${BASH_SOURCE[0]:-$0}"
+while [ -h "$source_path" ]; do
+    link_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+    target="$(readlink "$source_path")"
+    case "$target" in
+        /*) source_path="$target" ;;
+        *) source_path="$link_dir/$target" ;;
+    esac
+done
+bin_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+engine="$bin_dir/../scripts/install_settings.py"
+
+if [ ! -f "$engine" ]; then
+    echo "evisions-settings: the installer script is missing ($engine). Reinstall the evisions plugin." >&2
+    exit 1
+fi
+
+# A candidate counts only when it really runs Python 3.9 or newer: on Windows, python3 can be a Store
+# stub that only prints an install hint, and on older systems python can be Python 2 or an old 3.x.
+version_check='import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'
+
+if command -v python3 >/dev/null 2>&1 && python3 -c "$version_check" >/dev/null 2>&1; then
+    exec python3 "$engine" "$@"
+fi
+if command -v python >/dev/null 2>&1 && python -c "$version_check" >/dev/null 2>&1; then
+    exec python "$engine" "$@"
+fi
+if command -v py >/dev/null 2>&1 && py -3 -c "$version_check" >/dev/null 2>&1; then
+    exec py -3 "$engine" "$@"
+fi
+
+echo "evisions-settings needs Python 3.9 or newer, and none was found (tried python3, python and py -3)." >&2
+echo "Install Python from https://www.python.org/downloads/ and run this command again." >&2
+exit 1
