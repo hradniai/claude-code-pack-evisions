@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# SessionStart hook of the evisions plugin: injects the documentation standard and the kit map into
-# the session as additionalContext, plus a note when the session started in the home directory or a
-# filesystem root (the model is not told $HOME, so it cannot tell on its own).
+# SessionStart hook of the evisions plugin: injects one part of the kit into the session as
+# additionalContext. Without an argument it emits the documentation standard, plus a note when the
+# session started in the home directory or a filesystem root (the model is not told $HOME, so it cannot
+# tell on its own); with the argument `kit-map` it emits the kit map.
 # Plain bash only (no jq, no python) so it runs unchanged on Linux, macOS (bash 3.2) and Git Bash on
 # Windows. It always exits 0 because a failing hook must never block a session: a missing context file
 # becomes a one-line notice instead of an error.
-# Claude Code caps additionalContext at 10,000 characters; above that the text is replaced by a file
-# path and a preview, so everything injected must stay under it (tests/test_hook.py checks).
+# Claude Code caps each additionalContext string at 10,000 characters; above that the text is replaced
+# by a file path and a preview. The two parts together exceed it, so hooks.json registers one handler
+# per part, each with its own budget (tests/test_hook.py checks every emitted string).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -95,16 +97,21 @@ SESSION DIRECTORY: this session started in ${where} (${session_dir}), which is n
 "
 fi
 
-standard="$(read_context context/documentation-standard.md)"
-kit_map="$(read_context context/kit-map.md)"
-
-context="<evisions_kit>
-The evisions plugin is active. Its documentation standard and kit map below apply to this whole session.
-${session_note}
-${standard}
+if [ "${1:-}" = "kit-map" ]; then
+    kit_map="$(read_context context/kit-map.md)"
+    context="<evisions_kit_map>
+The evisions plugin is active. Route work in this whole session with the kit map below.
 
 ${kit_map}
+</evisions_kit_map>"
+else
+    standard="$(read_context context/documentation-standard.md)"
+    context="<evisions_kit>
+The evisions plugin is active. Its documentation standard below applies to this whole session; the kit map arrives in its own block.
+${session_note}
+${standard}
 </evisions_kit>"
+fi
 
 # printf rather than a heredoc, which has been reported to hang hooks under bash 5.3.
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \

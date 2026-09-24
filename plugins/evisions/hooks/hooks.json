@@ -9,6 +9,43 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\"",
             "shell": "bash",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\" kit-map",
+            "shell": "bash",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/safety-start\"",
+            "shell": "bash",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/current-time\"",
+            "shell": "bash",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python\" hooks/bash_safety.py",
+            "shell": "bash",
+            "timeout": 30
           }
         ]
       }

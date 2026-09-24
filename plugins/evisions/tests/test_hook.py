@@ -1,4 +1,5 @@
-"""Tests for the SessionStart hook that injects the documentation standard and the kit map.
+"""Tests for the SessionStart hook that injects the documentation standard and, with the argument
+`kit-map`, the kit map (two handlers, so each string gets its own additionalContext budget).
 
 Run from the plugin root: python3 -m unittest discover -s tests
 """
@@ -26,8 +27,12 @@ HOME_NOTE = "SESSION DIRECTORY: this session started in the user's home director
 ROOT_NOTE = "SESSION DIRECTORY: this session started in a filesystem root"
 
 
-def run_hook(plugin_root=PLUGIN_ROOT, stdin="", cwd=None, home=None, userprofile=None):
-    """Run the hook the way Claude Code does: JSON on stdin, PWD set to the session directory."""
+KIT_MAP_PART = "kit-map"
+
+
+def run_hook(plugin_root=PLUGIN_ROOT, stdin="", cwd=None, home=None, userprofile=None, part=None):
+    """Run the hook the way Claude Code does: JSON on stdin, PWD set to the session directory, and
+    the part argument hooks.json passes (none for the documentation standard, `kit-map`)."""
     cwd = Path(cwd) if cwd else plugin_root
     env = dict(os.environ, CLAUDE_PLUGIN_ROOT=str(plugin_root), PWD=str(cwd))
     env.pop("USERPROFILE", None)
@@ -36,7 +41,7 @@ def run_hook(plugin_root=PLUGIN_ROOT, stdin="", cwd=None, home=None, userprofile
     if userprofile is not None:
         env["USERPROFILE"] = userprofile
     return subprocess.run(
-        [str(Path(plugin_root) / "hooks" / "session-start")],
+        [str(Path(plugin_root) / "hooks" / "session-start"), *([part] if part else [])],
         input=stdin,
         cwd=str(cwd),
         env=env,
@@ -65,60 +70,73 @@ def session_input(cwd: str) -> str:
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required to run the hook")
 class SessionStartHookTest(unittest.TestCase):
-    def test_output_is_valid_json_with_both_context_files(self):
+    def test_default_part_is_the_documentation_standard(self):
         context = parse_context(self, run_hook())
         self.assertTrue(context.startswith("<evisions_kit>"))
         self.assertTrue(context.rstrip().endswith("</evisions_kit>"))
-        for marker in (
-            "<documentation_standard>",
-            "# Documentation standard",
-            "</documentation_standard>",
-            "<kit_map>",
-            "# Kit map",
-            "</kit_map>",
-        ):
+        for marker in ("<documentation_standard>", "# Documentation standard", "</documentation_standard>"):
             self.assertIn(marker, context)
+        self.assertNotIn("<kit_map>", context)
+
+    def test_kit_map_part_is_the_kit_map(self):
+        context = parse_context(self, run_hook(part=KIT_MAP_PART))
+        self.assertTrue(context.startswith("<evisions_kit_map>"))
+        self.assertTrue(context.rstrip().endswith("</evisions_kit_map>"))
+        for marker in ("<kit_map>", "# Kit map", "</kit_map>"):
+            self.assertIn(marker, context)
+        self.assertNotIn("<documentation_standard>", context)
 
     def test_context_files_are_injected_verbatim(self):
-        context = parse_context(self, run_hook())
-        for name in (STANDARD, KIT_MAP):
-            text = (PLUGIN_ROOT / name).read_text(encoding="utf-8").rstrip("\n")
-            self.assertIn(text, context, name)
+        for part, name in ((None, STANDARD), (KIT_MAP_PART, KIT_MAP)):
+            with self.subTest(part=part):
+                context = parse_context(self, run_hook(part=part))
+                text = (PLUGIN_ROOT / name).read_text(encoding="utf-8").rstrip("\n")
+                self.assertIn(text, context, name)
 
-    def test_context_stays_under_the_additional_context_cap(self):
+    def test_every_part_stays_under_the_additional_context_cap(self):
         with tempfile.TemporaryDirectory() as home:
-            # The home case adds the session-directory note, so it is the longest output.
-            for result in (run_hook(), run_hook(stdin=session_input(home), home=home)):
-                context = parse_context(self, result)
-                self.assertLess(len(context), ADDITIONAL_CONTEXT_CAP)
+            for part in (None, KIT_MAP_PART):
+                # The home case adds the session-directory note to the standard, its longest output.
+                for result in (run_hook(part=part), run_hook(stdin=session_input(home), home=home, part=part)):
+                    with self.subTest(part=part):
+                        context = parse_context(self, result)
+                        self.assertLess(len(context), ADDITIONAL_CONTEXT_CAP)
 
-    def test_missing_context_file_still_exits_zero_with_notice(self):
+    def test_session_directory_note_only_with_the_standard(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertIn(NOTE, parse_context(self, run_hook(stdin=session_input(home), home=home)))
+            kit_map = parse_context(self, run_hook(stdin=session_input(home), home=home, part=KIT_MAP_PART))
+            self.assertNotIn(NOTE, kit_map)
+
+    def test_missing_kit_map_still_exits_zero_with_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "evisions"
             shutil.copytree(PLUGIN_ROOT, copy)
             (copy / KIT_MAP).unlink()
-            context = parse_context(self, run_hook(copy))
+            context = parse_context(self, run_hook(copy, part=KIT_MAP_PART))
             self.assertIn(f"{KIT_MAP} is missing", context)
-            self.assertIn("# Documentation standard", context)
             self.assertNotIn("<kit_map>", context)
+            self.assertIn("# Documentation standard", parse_context(self, run_hook(copy)))
 
     def test_both_context_files_missing_still_exits_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "evisions"
             shutil.copytree(PLUGIN_ROOT, copy)
             shutil.rmtree(copy / "context")
-            context = parse_context(self, run_hook(copy))
-            self.assertIn(f"{STANDARD} is missing", context)
-            self.assertIn(f"{KIT_MAP} is missing", context)
+            self.assertIn(f"{STANDARD} is missing", parse_context(self, run_hook(copy)))
+            self.assertIn(f"{KIT_MAP} is missing", parse_context(self, run_hook(copy, part=KIT_MAP_PART)))
 
     def test_special_characters_survive_json_escaping(self):
         tricky = 'back\\slash "quoted" tab\there cr\rhere \\n literal, čeština – žluťoučký kůň'
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "evisions"
             shutil.copytree(PLUGIN_ROOT, copy)
-            (copy / KIT_MAP).write_text(tricky + "\n", encoding="utf-8", newline="")
-            context = parse_context(self, run_hook(copy))
-            self.assertIn(tricky, context)
+            # write_bytes, not write_text(newline=...), which needs Python 3.10; the kit supports 3.9.
+            (copy / KIT_MAP).write_bytes((tricky + "\n").encode("utf-8"))
+            (copy / STANDARD).write_bytes((tricky + "\n").encode("utf-8"))
+            for part in (None, KIT_MAP_PART):
+                with self.subTest(part=part):
+                    self.assertIn(tricky, parse_context(self, run_hook(copy, part=part)))
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required to run the hook")
@@ -195,8 +213,14 @@ class HooksJsonTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|clear|compact")
         handlers = entries[0]["hooks"]
-        self.assertEqual(len(handlers), 1)
-        self.assertEqual(handlers[0]["type"], "command")
+        # The documentation standard, the kit map and the safety protocol are separate handlers, so
+        # each gets its own 10,000-character additionalContext budget.
+        self.assertEqual([h["type"] for h in handlers], ["command", "command", "command"])
+        self.assertIn("hooks/session-start", handlers[0]["command"])
+        self.assertFalse(handlers[0]["command"].endswith(KIT_MAP_PART))
+        self.assertIn("hooks/session-start", handlers[1]["command"])
+        self.assertTrue(handlers[1]["command"].endswith(f'" {KIT_MAP_PART}'))
+        self.assertIn("hooks/safety-start", handlers[2]["command"])
 
     def test_command_points_at_an_existing_executable(self):
         command = self.config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -205,6 +229,34 @@ class HooksJsonTest(unittest.TestCase):
         self.assertEqual(path, HOOK)
         self.assertTrue(path.is_file())
         self.assertTrue(os.access(path, os.X_OK), f"{path} is not executable")
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required to run the hook")
+    def test_registered_session_start_commands_run_under_the_cap(self):
+        # Runs each registered command string the way Claude Code does (through bash, with the plugin
+        # root set), so a wrong argument or quoting in hooks.json fails here, not in a user's session.
+        commands = [
+            h["command"]
+            for group in self.config["hooks"]["SessionStart"]
+            for h in group["hooks"]
+            if "hooks/session-start" in h["command"]
+        ]
+        self.assertEqual(len(commands), 2)
+        seen = set()
+        for command in commands:
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    input="",
+                    cwd=str(PLUGIN_ROOT),
+                    env=dict(os.environ, CLAUDE_PLUGIN_ROOT=str(PLUGIN_ROOT)),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                context = parse_context(self, result)
+                self.assertLess(len(context), ADDITIONAL_CONTEXT_CAP)
+                seen.add(context.split(">", 1)[0] + ">")
+        self.assertEqual(seen, {"<evisions_kit>", "<evisions_kit_map>"})
 
     def test_hook_script_has_bash_shebang_and_lf_endings(self):
         raw = HOOK.read_bytes()

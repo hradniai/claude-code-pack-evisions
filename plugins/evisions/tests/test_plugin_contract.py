@@ -23,17 +23,66 @@ THIS_FILE = Path(__file__).resolve()
 MARKETPLACE_NAME = "claude-code-pack-evisions"
 PLUGIN_NAME = "evisions"
 
-SKILLS = ("checkpoint", "end", "adr", "prompt-eval", "research", "socratic-brainstormer")
-AGENTS = ("features-documenter", "prompt-engineer", "research-analyst", "research-lead")
+SKILLS = (
+    "checkpoint",
+    "end",
+    "adr",
+    "prompt-eval",
+    "research",
+    "socratic-brainstormer",
+    "prd",
+    "bug-log",
+    "tech-debt-log",
+    "skill-scanner",
+)
+AGENTS = (
+    "features-documenter",
+    "prompt-engineer",
+    "research-analyst",
+    "research-lead",
+    "code-reviewer",
+    "security-auditor",
+)
+# Scripts Claude Code or the user runs directly: each needs a shebang and the executable bit. The
+# hooks are started through `bash <script>` so a lost bit on Windows does not disable them, but a git
+# install on macOS and Linux keeps the bit, and `bin/` entries are only found on PATH with it.
+EXECUTABLES = (
+    "hooks/session-start",
+    "hooks/safety-start",
+    "hooks/current-time",
+    "hooks/run-python",
+    "bin/list-env-keys",
+    "bin/evisions-settings",
+)
 REQUIRED_FILES = (
     *(f"skills/{skill}/SKILL.md" for skill in SKILLS),
     "skills/adr/template.md",
     "skills/prompt-eval/scripts/sanitize_prompt.py",
+    "skills/prd/references/prd-template.md",
+    "skills/prd/references/eu-compliance-checklist.md",
+    "skills/prd/references/auth-strategy-decision-tree.md",
+    "skills/prd/references/threat-model-template.md",
+    "skills/skill-scanner/scripts/scan.py",
+    "skills/skill-scanner/references/review-contract.md",
     *(f"agents/{agent}.md" for agent in AGENTS),
     "hooks/hooks.json",
-    "hooks/session-start",
+    *EXECUTABLES,
+    "hooks/bash_safety.py",
+    "scripts/env_key_classify.py",
+    "scripts/install_settings.py",
+    "scripts/statusline.py",
+    "settings/baseline.json",
     "context/documentation-standard.md",
     "context/kit-map.md",
+    "context/safety.md",
+)
+# Every hook the plugin must register: (event, matcher that must be covered or None, script name).
+REQUIRED_HOOKS = (
+    ("SessionStart", None, "session-start"),
+    ("SessionStart", None, "session-start\" kit-map"),
+    ("SessionStart", None, "safety-start"),
+    ("UserPromptSubmit", None, "current-time"),
+    ("PreToolUse", ("Bash", "PowerShell", "Read", "Grep"), "bash_safety.py"),
 )
 
 # Skills carry name and description (plus disable-model-invocation where needed), agents carry name,
@@ -49,7 +98,7 @@ FORBIDDEN_KEYS = {"metadata", "machines", "owner", "path", "hooks", "mcpServers"
 LEAK_PATTERNS = {
     "maintainer first name": re.compile(r"[sš]imon", re.IGNORECASE),
     "maintainer surname": re.compile(r"hradn[ií]", re.IGNORECASE),
-    "tool that does not ship": re.compile(r"SendMessage|research-engine|idea-file-creator|round-table|list-env-keys|PROMPT-EVAL"),
+    "tool that does not ship": re.compile(r"SendMessage|research-engine|idea-file-creator|round-table|PROMPT-EVAL"),
 }
 
 # Names that must never appear in this public repository cannot be listed in it either. They live
@@ -247,24 +296,83 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(found_skills - set(SKILLS), set(), "skill folders not in the spec layout")
         self.assertEqual(found_agents - set(AGENTS), set(), "agent files not in the spec layout")
 
-    def test_session_start_hook_is_executable(self) -> None:
-        script = PLUGIN_ROOT / "hooks" / "session-start"
-        if not script.is_file():
-            self.skipTest("hooks/session-start is missing; reported by test_required_files_exist")
-        self.assertTrue(os.access(script, os.X_OK), "hooks/session-start is not executable")
-        self.assertTrue(script.read_text(encoding="utf-8").startswith("#!"), "hooks/session-start has no shebang")
+    def test_scripts_are_executable_with_shebang(self) -> None:
+        for name in EXECUTABLES:
+            script = PLUGIN_ROOT / name
+            with self.subTest(script=name):
+                if not script.is_file():
+                    self.skipTest(f"{name} is missing; reported by test_required_files_exist")
+                self.assertTrue(os.access(script, os.X_OK), f"{name} is not executable")
+                self.assertTrue(script.read_text(encoding="utf-8").startswith("#!"), f"{name} has no shebang")
 
-    def test_hooks_json_registers_session_start(self) -> None:
+    def test_hooks_json_registers_every_hook(self) -> None:
         path = PLUGIN_ROOT / "hooks" / "hooks.json"
         if not path.is_file():
             self.skipTest("hooks/hooks.json is missing; reported by test_required_files_exist")
         data, error = load_json(path)
         if error:
             self.fail(error)
-        groups = data.get("hooks", {}).get("SessionStart", [])
-        self.assertTrue(groups, "hooks.json registers no SessionStart hook")
-        commands = [hook.get("command", "") for group in groups for hook in group.get("hooks", [])]
-        self.assertTrue(any("session-start" in command for command in commands), "no SessionStart hook runs hooks/session-start")
+        for event, tools, script in REQUIRED_HOOKS:
+            with self.subTest(event=event, script=script):
+                groups = data.get("hooks", {}).get(event, [])
+                matching = [
+                    group
+                    for group in groups
+                    if any(script in hook.get("command", "") for hook in group.get("hooks", []))
+                ]
+                self.assertTrue(matching, f"no {event} hook runs {script}")
+                if tools:
+                    matchers = {name for group in matching for name in group.get("matcher", "").split("|")}
+                    self.assertEqual(sorted(set(tools) - matchers), [], f"{script} does not cover these tools")
+
+    def test_hook_commands_quote_the_plugin_root(self) -> None:
+        # Claude Code 2.1.281 warns on an unquoted ${CLAUDE_PLUGIN_ROOT}, and a path with a space
+        # (a Windows user folder) would split into two arguments.
+        path = PLUGIN_ROOT / "hooks" / "hooks.json"
+        data, error = load_json(path)
+        if error:
+            self.fail(error)
+        for event, groups in data.get("hooks", {}).items():
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    command = hook.get("command", "")
+                    with self.subTest(event=event, command=command):
+                        unquoted = re.search(r'(?<!")\$\{CLAUDE_PLUGIN_ROOT\}', command)
+                        self.assertIsNone(unquoted, "unquoted ${CLAUDE_PLUGIN_ROOT}")
+
+
+class BaselineTests(unittest.TestCase):
+    """The settings baseline is merged into a user's settings.json, where one invalid value voids the
+    whole file without a message in headless runs, so its shape is checked here as well as by the
+    installer's own tests."""
+
+    def load_baseline(self) -> dict:
+        data, error = load_json(PLUGIN_ROOT / "settings" / "baseline.json")
+        if error:
+            self.fail(error)
+        return data
+
+    def rules(self, data: object) -> list[str]:
+        found = []
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key in {"allow", "deny", "ask"} and isinstance(value, list):
+                    found.extend(item for item in value if isinstance(item, str))
+                else:
+                    found.extend(self.rules(value))
+        return found
+
+    def test_no_rule_that_never_matches_or_is_skipped(self) -> None:
+        for rule in self.rules(self.load_baseline()):
+            with self.subTest(rule=rule):
+                self.assertNotIn("|", rule, "rules are matched per subcommand, so a pipe never matches")
+                self.assertFalse(rule.startswith("Task"), "an unanchored tool-name glob is skipped at load")
+                self.assertFalse(rule.startswith("Write("), "Write(path) rules are dead; Edit(path) gates every edit tool")
+
+    def test_no_value_that_voids_the_settings_file(self) -> None:
+        text = (PLUGIN_ROOT / "settings" / "baseline.json").read_text(encoding="utf-8")
+        self.assertNotRegex(text, r'"cleanupPeriodDays"\s*:\s*0\b', "cleanupPeriodDays 0 fails validation")
+        self.assertNotIn('"attribution"', text, "attribution: false makes older CLIs skip the whole file")
 
 
 class FrontmatterTests(unittest.TestCase):

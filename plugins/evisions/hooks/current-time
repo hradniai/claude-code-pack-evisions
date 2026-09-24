@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# UserPromptSubmit hook of the evisions plugin: adds the current local time to every prompt.
+# Claude Code tells the model today's date but not the time, so without this Claude guesses the time
+# and writes wrong timestamps into journals (worklog entries, notes). About 25 tokens per prompt.
+# Plain bash (no jq); printf rather than a heredoc, which has been reported to hang hooks under
+# bash 5.3. It always exits 0: a clock hook must never block a prompt.
+
+# Escape a string for a JSON string literal. Each ${s//old/new} is one pass; no '&' appears in a
+# replacement, so bash 5.2+ patsub_replacement cannot alter the result.
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Read the hook input so Claude Code never writes a long prompt into a pipe nobody reads.
+if [ ! -t 0 ]; then
+    cat >/dev/null 2>&1
+fi
+
+now="$(date '+%Y-%m-%d %H:%M' 2>/dev/null)"
+zone="$(date '+%Z' 2>/dev/null)"
+if [ -n "$now" ]; then
+    [ -n "$zone" ] && now="${now} (${zone})"
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Current local time: %s. Use it for timestamps in journals and other dated files."}}\n' \
+        "$(escape_for_json "$now")"
+fi
+
+exit 0

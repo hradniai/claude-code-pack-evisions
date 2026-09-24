@@ -2,7 +2,10 @@
 
 A Claude Code plugin marketplace with one plugin, `evisions`: working discipline for the eVisions team.
 It keeps every project resumable through plain files on disk (current state, history, decisions,
-feature docs) and adds help for research, prompt writing and thinking an idea through.
+feature docs) and adds help for research, prompt writing and thinking an idea through. Since 1.1.0 it
+also carries a safety baseline (a hook that blocks secret reads and destructive commands, and an
+installer for the matching Claude Code settings), a PRD interview, code and security review agents, a
+log for bugs and tech debt found along the way, and an admission check for third-party skills.
 
 The user manual for the team, written for non-developers, is [`USER-MANUAL.md`](USER-MANUAL.md).
 
@@ -10,10 +13,17 @@ The user manual for the team, written for non-developers, is [`USER-MANUAL.md`](
 
 | Component | Command or agent | What it does |
 |---|---|---|
-| Session hook | runs by itself | At session start, after `/clear` and after compaction, loads the documentation standard and a map of which skill or agent does which job. |
+| Session hook | runs by itself | At session start, after `/clear` and after compaction, loads the documentation standard and a map of which skill or agent does which job (two of the three `SessionStart` handlers; the third is the safety protocol below). |
+| Safety protocol | runs by itself | At the same moments, tells Claude how to handle a block (stop, say what was blocked and why, give the user the exact command to run themselves, never work around it) and never to show a secret value; reports when Python is missing and whether the settings baseline is installed. |
+| Safety hook | runs by itself | Before every `Bash`, `PowerShell`, `Read` and `Grep` call, blocks secret reads and destructive commands. See [Safety baseline](#safety-baseline). |
+| Time hook | runs by itself | Tells Claude the current local time on every message (Claude Code gives it only the date), so timestamps in the journals are right. |
 | Skill `checkpoint` | `/checkpoint` | Mid-session save: one worklog entry, a refreshed `WORKSTATE.md`, a local git commit of the touched files. Never pushes. |
-| Skill `end` | `/end` | Session close: proposes the session's decisions for approval, writes worklog, WORKSTATE and the approved decisions, syncs feature docs, commits, asks before any push. |
+| Skill `end` | `/end` | Session close: proposes the session's decisions for approval, writes worklog, WORKSTATE and the approved decisions, writes the captured bugs and tech debt without asking, syncs feature docs, commits, asks before any push. |
 | Skill `adr` | `/adr` | Writes an architecture decision record (ADR) into `docs/decisions/`, or supersedes one. |
+| Skill `prd` | `/prd` | Interviews the user, one block of questions at a time and in their language, to a PRD (product requirements document) written in English to `docs/prd/<slug>-prd.md`: problem, goals, users, scope and acceptance criteria, plus the technical dimensions a non-developer does not know to ask about (GDPR and EU AI Act triage, data classification, authentication, backup and disaster recovery, a STRIDE threat model). The WHAT and WHY, not the HOW. |
+| Skill `bug-log` | `/bug-log` | Writes a bug found while working on something else into `BUGS.md`, or marks a logged bug fixed. `/end` runs it for every open `BUG-TODO:` line in `WORKSTATE.md`. |
+| Skill `tech-debt-log` | `/tech-debt-log` | Writes code that works but is costly or risky into `TECH-DEBT.md`, or marks logged debt paid. `/end` runs it for every open `DEBT-TODO:` line in `WORKSTATE.md`. |
+| Skill `skill-scanner` | `/skill-scanner` | Checks a third-party skill or plugin on disk before it is installed: a bundled static scanner plus a read-only review, returning `BLOCK`, `REVIEW` or `PERMIT WITHIN COVERAGE` with the evidence, and compares a new version against an earlier scan. Never installs, runs or imports the target. |
 | Skill `prompt-eval` | `/prompt-eval` | Static sanity check of a prompt by a bundled script. Calls no model. |
 | Skill `research` | `/research` | Routes a research question to one research agent or to a lead with up to five workers; returns a verdict with sources and saves a file in `research/`. |
 | Skill `socratic-brainstormer` | `/socratic-brainstormer` | Questions that develop the user's own raw idea instead of handing them an answer. |
@@ -21,6 +31,10 @@ The user manual for the team, written for non-developers, is [`USER-MANUAL.md`](
 | Agent `prompt-engineer` | `evisions:prompt-engineer` | Writes or improves a prompt, system prompt, skill or agent file, then runs the sanity check. |
 | Agent `research-analyst` | `evisions:research-analyst` | One-angle web research with tier-labelled findings. |
 | Agent `research-lead` | `evisions:research-lead` | Several-angle research: splits the question, runs up to five analysts, synthesizes. |
+| Agent `code-reviewer` | `evisions:code-reviewer` | Code review of the scope the user names (the whole app, a feature, files, a commit or the uncommitted changes): correctness bugs, security weaknesses, silenced errors, needless complexity, changes beyond the task, naming. Re-verifies every finding in a confidence pass and drops false positives; answers in the user's language. Read-only: it reports, it never fixes. |
+| Agent `security-auditor` | `evisions:security-auditor` | Security audit of the scope the user names, the server and deployment configuration included: secrets, authentication and authorization, injection, data exposure, the AI lethal trifecta, LLM cost guards, GDPR and EU AI Act. Confidence pass as above; each finding with its business risk and a fix, in the user's language. Read-only. For code AND security, both agents run in parallel. |
+| Helper `list-env-keys` | on the `PATH` of Claude's Bash tool | Lists the names of the keys in env files, never a value. `--from <file>` reads one file, `--classify` adds each key's state (empty, placeholder, filled). |
+| Helper `evisions-settings` | on the `PATH` of Claude's Bash tool, or by path | Installs, checks and removes the settings baseline that a plugin cannot set itself. See [Safety baseline](#safety-baseline). |
 
 Every command also works with the plugin prefix, for example `/evisions:checkpoint`. The prefix is
 needed when the user has their own skill or command of the same name.
@@ -28,11 +42,13 @@ needed when the user has their own skill or command of the same name.
 ## Install
 
 Every employee installs the plugin for themselves, on their own laptop or container. The repository is
-public, so no GitHub login is needed.
+public, so no GitHub login is needed. Requirements: Claude Code, and Python 3.9 or newer for the safety
+hook, the prompt check and the skill scanner (on Windows also Git Bash, which the hooks run in). Without Python the safety
+hook blocks Claude's commands and file reads; see [Safety baseline](#safety-baseline).
 
 With Claude's help: clone this repository, open Claude Code in it and say "install it following
-INSTRUCTIONS.md". Claude follows [`INSTRUCTIONS.md`](INSTRUCTIONS.md), confirms each command and
-verifies the result. By hand:
+INSTRUCTIONS.md". Claude follows [`INSTRUCTIONS.md`](INSTRUCTIONS.md), confirms each command, offers
+the settings baseline and verifies the result. By hand:
 
 ```bash
 claude plugin marketplace add https://github.com/hradniai/claude-code-pack-evisions
@@ -40,7 +56,8 @@ claude plugin install evisions@claude-code-pack-evisions
 claude plugin list
 ```
 
-Then restart Claude Code. Use the `https://` URL as written: the short form
+Then run the settings installer if the baseline is wanted (see [Safety baseline](#safety-baseline)) and
+restart Claude Code. Use the `https://` URL as written: the short form
 `hradniai/claude-code-pack-evisions` makes Claude Code clone over SSH, which fails without an SSH key for
 GitHub.
 
@@ -54,21 +71,112 @@ claude plugin marketplace update claude-code-pack-evisions
 claude plugin update evisions@claude-code-pack-evisions
 ```
 
-Restart Claude Code afterwards. An update arrives only when the `version` in the manifests changes. When
-installed from a local clone, `git pull` in the clone and a restart are enough.
+Then re-run `evisions-settings --apply` by path, so the new version's installer runs (see
+[Safety baseline](#safety-baseline)), and restart Claude Code. An update arrives only when the
+`version` in the manifests changes. When installed from a local clone, `git pull` in the clone,
+`evisions-settings --apply` and a restart are enough.
 
 ## Uninstall
 
 ```bash
+"<repository path>/plugins/evisions/bin/evisions-settings" --remove
 claude plugin uninstall evisions@claude-code-pack-evisions
 claude plugin marketplace remove claude-code-pack-evisions
 ```
 
-## What it does not touch
+The first line undoes the settings baseline and must run while the plugin is still there, because the
+installer ships with it; when the baseline was never applied, it reports that there is nothing to undo.
+Restart Claude Code afterwards.
 
-The plugin carries no settings, no permission rules and no safety hooks. The team's own Claude Code
-setup stays in charge, and where an environment rule restricts where files may be written, that rule
-wins over the plugin's documentation standard.
+## Safety baseline
+
+The baseline narrows what can go wrong when Claude runs commands and reads files. It is a guard against
+accidents by an overeager agent, not a barrier against a determined attacker: a deliberately disguised
+command can still get past it. It is not a sandbox; its known gaps are listed under [Limits](#limits).
+
+**The safety hook** is part of the plugin and active for everyone who installs it, with no settings
+change. Before every `Bash`, `PowerShell`, `Read` and `Grep` call it blocks:
+
+- reading secret values from env files (`.env`, `.env.local`, `.env.production` and any other `.env.*`,
+  also through a wildcard such as `.env.*`; `.env.shared` and placeholder files ending in `.example`,
+  `.sample`, `.template` or `.dist` stay readable), including inline interpreter code (`python -c`,
+  `node -e`, a heredoc) or a loop that reads them;
+- reading SSH, AWS and GnuPG keys, git credentials, browser data and similar secret folders;
+- recursive deletion anywhere in a command, with or without `-f`: `rm -r`, `find -delete`,
+  `Remove-Item -Recurse`, also inside `find -exec`, `xargs` or chained commands. `git rm -r` and
+  `docker rm` are exempt; deleting one file (`rm file`) and removing an empty folder (`rmdir`) pass;
+- a download piped into a shell or an interpreter, and download-then-run; `sh -c` and `eval` around
+  destructive commands;
+- dangerous docker flags (privileged mode, a mount of the host root or of a credential folder), disk
+  wiping, fork bombs, and a `mv` that would silently overwrite an existing file.
+
+It reads a command the way a shell does (quotes, escapes, subshells, heredocs), so `c''at .env` counts
+as a read, while a commit message or a pull request text that merely mentions `.env` is not blocked.
+Every block message starts with `evisions safety:`. The hook works in every permission mode, bypass
+mode (`--dangerously-skip-permissions`) included. PowerShell coverage is best-effort and untested on
+Windows.
+
+**Python.** The hook is `hooks/bash_safety.py`, started through the launcher `hooks/run-python`, and it
+needs Python 3.9 or newer. Without Python it fails closed: Bash commands and file reads are blocked with
+a message saying Python is missing, because a safety check that cannot start would otherwise let
+everything through silently. That makes Python 3.9 or newer an install requirement.
+
+**The settings installer.** Claude Code does not let a plugin set permission rules or other settings
+(measured on 2.1.281: a plugin's `settings.json` honours only `agent` and `subagentStatusLine`), so
+`evisions-settings` merges the rest of the baseline into the user's `~/.claude/settings.json` (or
+`$CLAUDE_CONFIG_DIR/settings.json`). While the plugin is enabled it is on the `PATH` of Claude's Bash
+tool; outside a session, run it by path: `<repository path>/plugins/evisions/bin/evisions-settings`,
+where `<repository path>` is the local clone or the marketplace's `installLocation` from
+`claude plugin marketplace list --json`. Right after an update, use the path form: the command on a
+running session's `PATH` may still belong to the version that session started with.
+
+| Command | What it does |
+|---|---|
+| `evisions-settings` | Dry run: prints the profile and why it was chosen, and what would be added. Writes nothing. |
+| `evisions-settings --apply` | Backs up the settings file, then adds only what is missing. Refuses a settings file that is not valid JSON, never removes or changes the user's own entries, and records what it added. Safe to re-run: after a plugin update it brings the settings in line with the new baseline, adding new rules and removing rules it added earlier that the new baseline dropped. An apply that was interrupted is finished by the next run, and a record of what it added that was edited or damaged makes it refuse and write nothing. |
+| `evisions-settings --check` | Exits 0 when the baseline is installed, 1 with a list of what is missing or changed. |
+| `evisions-settings --apply --restore-declined` | Adds back the baseline items the user removed earlier, which later applies otherwise leave out. |
+| `evisions-settings --remove` | Backs up, then undoes exactly what it added. Entries the user changed or added themselves stay. When it created the settings file and nothing else is left in it, it deletes the file instead of leaving an empty one. Without a record it reports that there is nothing to undo. |
+| `--no-statusline` | Skips the status line. |
+| `--profile standard`, `--profile managed` | Overrides the profile detection. |
+
+Where its files go, all in the Claude Code config folder (`~/.claude/`, or `$CLAUDE_CONFIG_DIR`):
+backups next to the settings file as `settings.json.bak-evisions-<timestamp>`, made before every write
+to an existing file; the record of what it added in `evisions/settings-applied.json`, which `--check`,
+`--remove` and later applies read and the safety protocol tests for; and a copy of the status line
+script in `evisions/statusline.py`, so the status line does not depend on where the plugin is installed.
+
+The profile is detected automatically, from whether an administrator policy file
+(`managed-settings.json`, or files in `managed-settings.d/`) exists in Claude Code's policy folder for
+the platform:
+
+- **`standard`**: no administrator policy on the machine, typically a laptop. Adds permission rules:
+  85 allow rules for everyday safe commands, so Claude does not ask about every `ls` or `git status`;
+  83 deny rules for destructive commands and secret files; 27 ask rules for installs, pushes,
+  deletions and similar. Every git deny rule, and the ask rules for `git push`, `rebase` and `merge`,
+  has a `git -C <dir> ...` twin, because a rule such as `Bash(git reset --hard*)` does not match
+  `git -C . reset --hard` (measured on Claude Code 2.1.281). Turns bypass mode off
+  (`disableBypassPermissionsMode: "disable"`). Keeps transcripts for 10 years
+  (`cleanupPeriodDays: 3650`; Claude Code's default is 30 days, after which `/resume` loses older
+  sessions). Turns off telemetry and error reporting
+  (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) and feedback surveys. Sets a three-line status line
+  (model, project and git branch, how full the context is, 5-hour and 7-day usage) when the user has
+  none.
+- **`managed`**: the machine has an administrator's Claude Code policy, for example the company server
+  containers. That policy owns permissions and bypass mode, and the administrator's environment owns
+  telemetry, so the installer adds no permission rules, does not touch bypass mode and sets no
+  environment variables; it applies only transcript retention, the feedback survey setting, and the
+  status line when absent. An env var an earlier standard install set is taken back when the profile
+  becomes managed.
+
+In both profiles a scalar setting or env var is set only when the user has no value of their own, and
+an existing status line is never replaced. On the standard profile, `DISABLE_TELEMETRY` also switches
+off Claude Code's feature-flag fetching, so some claude.ai-connected features, such as plugin and skill
+sync from claude.ai and Remote Control, stop working. A user who needs them removes that entry from
+their settings. The installer treats any baseline item the user removes (a setting, an env var or a rule) as
+their choice: later applies leave it out and list it as declined, and
+`evisions-settings --apply --restore-declined` brings such items back. Settings take effect after
+Claude Code restarts.
 
 ## Files it creates in a project
 
@@ -79,12 +187,18 @@ wins over the plugin's documentation standard.
 | `docs/decision-log.md` | Smaller decisions, one row each, plus a pointer row per ADR. |
 | `docs/decisions/NNNN-title.md` | ADRs, one decision each. |
 | `docs/features/` | Feature docs (an existing root `features/` is used instead when the project has one). |
+| `docs/prd/` | PRDs, `<slug>-prd.md`, written by `/prd`. |
+| `BUGS.md` | Bugs found along the way, written by `evisions:bug-log`, newest first. |
+| `TECH-DEBT.md` | Code that works but is costly or risky, written by `evisions:tech-debt-log`, newest first. |
 | `research/` | Research reports, `{topic}-research-{YYYY-MM-DD}.md`. |
 | `prompts/` | Prompts written by the prompt engineer. |
 
 Journals are always written in English, whatever language the user speaks; the conversation follows
 the user's language. Only decisions the user made or confirmed are recorded, and a reason the user did
-not give is recorded as "not stated".
+not give is recorded as "not stated". Bugs and tech debt differ: noticed along the way, they are
+captured as `BUG-TODO:` or `DEBT-TODO:` lines in `WORKSTATE.md`, and `/end` writes them into `BUGS.md`
+and `TECH-DEBT.md` without an approval step. Where an environment rule restricts where files may be written,
+that rule wins over the plugin's documentation standard.
 
 ## Limits
 
@@ -96,13 +210,30 @@ not give is recorded as "not stated".
 - No model facts are bundled (no model IDs, prices or rankings), because they go stale faster than the
   plugin ships. A model recommendation must come from an official vendor page fetched in that session,
   or be labelled unverified.
+- The safety hook guards against accidents by an overeager agent, not against a determined attacker.
+  It and the deny rules catch commands that name a secret file, so these can still expose an env
+  file's values: a directory-wide search (for example `grep -r KEY .`), `git show HEAD:.env`,
+  `docker compose config` (which prints the resolved environment), and copying an env file under
+  another name and reading the copy.
+- A repository's own `.claude/settings.json` can set `disableAllHooks: true`, which switches off user
+  and plugin hooks, this safety hook included. Only an administrator's managed policy can prevent that.
+- Windows: the hooks need Git Bash and Python. PowerShell coverage is best-effort and untested on
+  Windows.
+- The skill scanner is static: it never runs the target, so behaviour that is new or dormant can evade
+  it. `PERMIT WITHIN COVERAGE` is an admission decision, not a safety certificate. It needs its
+  evidence directory (`$SKILL_SCANNER_EVIDENCE_DIR`, else `~/.skill-scanner/evidence`) to exist before
+  it saves a report.
+- On a machine with an administrator policy, the plugin's hook runs in addition to the administrator's
+  own; both may report a block for the same command.
 
 ## Companion plugins
 
-Three public add-ons fit the kit. They are optional and not part of this repository: nothing of theirs
-is copied here, each installs from its author's source under its author's license and gets its
-author's updates, and the kit's skills use them only when they are installed. `INSTRUCTIONS.md` Step 7
-installs each one only after the user confirms.
+Public add-ons fit the kit in two groups: three for planning and building, and a development group.
+They are optional and not part of this repository: nothing of theirs is copied here, each installs from
+its author's source under its author's license and gets its author's updates, and the kit's skills use
+them only when they are installed. Every installed plugin costs context in every session, so install
+only what the person actually uses. `INSTRUCTIONS.md` Step 8 installs each one only after the user
+confirms.
 
 | Companion | Install | What it adds |
 |---|---|---|
@@ -117,6 +248,19 @@ fallback, not the default: it adds 25 skills, one of them a generic `research` s
 The `https://` form for replan is deliberate: Claude Code clones the short form `kojott/claude-replan`
 over SSH, which fails without an SSH key for GitHub.
 
+**Development.** All from the official Anthropic marketplace, each installed with
+`claude plugin install <name>@claude-plugins-official`:
+
+| Companion | What it adds |
+|---|---|
+| `security-guidance` | Pattern-based security warnings while code is being edited. |
+| `context7` | Up-to-date library documentation instead of the model's memory. |
+| `playwright` | Drives a real browser to check that a web page actually works. |
+| `code-review` | Review of pull requests by several agents. |
+| `frontend-design` | Production-grade frontend and landing pages. |
+
+The kit ships no debugger: debugging is covered by Superpowers' `systematic-debugging` skill.
+
 ## Maintaining
 
 ```bash
@@ -125,8 +269,14 @@ claude plugin validate .
 claude plugin validate plugins/evisions
 ```
 
-Every release raises `version` in both `.claude-plugin/marketplace.json` and
+The unit tests cover the hooks, the settings installer, the helpers and the skill scanner as well as
+the plugin contract. Every release
+raises `version` in both `.claude-plugin/marketplace.json` and
 `plugins/evisions/.claude-plugin/plugin.json`; the contract test fails when they disagree.
+
+Left out of the general starter pack's kernel on purpose: a large-file read guard (it blocked
+screenshots, and Claude Code's Read tool now truncates large files itself), four pipe deny rules that
+never matched on current Claude Code, and the notes and inbox automation hooks.
 
 ## License
 
