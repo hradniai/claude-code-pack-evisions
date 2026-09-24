@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# SessionStart hook of the evisions plugin: injects the documentation standard and the kit map into
+# the session as additionalContext, plus a note when the session started in the home directory or a
+# filesystem root (the model is not told $HOME, so it cannot tell on its own).
+# Plain bash only (no jq, no python) so it runs unchanged on Linux, macOS (bash 3.2) and Git Bash on
+# Windows. It always exits 0 because a failing hook must never block a session: a missing context file
+# becomes a one-line notice instead of an error.
+# Claude Code caps additionalContext at 10,000 characters; above that the text is replaced by a file
+# path and a preview, so everything injected must stay under it (tests/test_hook.py checks).
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Print a context file (path relative to the plugin root), or a notice when it is missing.
+read_context() {
+    if [ -r "${PLUGIN_ROOT}/$1" ]; then
+        cat "${PLUGIN_ROOT}/$1"
+    else
+        printf '[evisions] %s is missing from the plugin; update or reinstall the plugin to restore it.' "$1"
+    fi
+}
+
+# Escape a string for a JSON string literal. Each ${s//old/new} is one pass; no '&' appears in a
+# replacement, so bash 5.2+ patsub_replacement cannot alter the result.
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Print the string value of key $2 in the JSON text $1, without jq. Copies characters up to the closing
+# quote and turns an escaped character into itself (\\ -> \, \" -> "), which is enough for a path.
+json_string_field() {
+    local rest="${1#*\"$2\"}" value="" ch
+    [ "$rest" = "$1" ] && return 1
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [ "${rest:0:1}" = ":" ] || return 1
+    rest="${rest:1}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [ "${rest:0:1}" = '"' ] || return 1
+    rest="${rest:1}"
+    while [ -n "$rest" ]; do
+        ch="${rest:0:1}"
+        if [ "$ch" = '\' ]; then
+            value="${value}${rest:1:1}"
+            rest="${rest:2}"
+        elif [ "$ch" = '"' ]; then
+            printf '%s' "$value"
+            return 0
+        else
+            value="${value}${ch}"
+            rest="${rest:1}"
+        fi
+    done
+    return 1
+}
+
+# Backslashes to slashes, trailing separators removed ("C:\Users\jana\" -> "C:/Users/jana", "/" stays).
+normalize_path() {
+    local p="${1//\\//}"
+    while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do
+        p="${p%/}"
+    done
+    printf '%s' "$p"
+}
+
+# The session directory: the "cwd" field of the hook input on stdin, else $PWD (both measured equal to
+# the directory Claude Code was started in). stdin is read only when it is not a terminal.
+hook_input=""
+if [ ! -t 0 ]; then
+    hook_input="$(cat)"
+fi
+session_dir="$(json_string_field "$hook_input" cwd)" || session_dir=""
+[ -n "$session_dir" ] || session_dir="$PWD"
+
+dir="$(normalize_path "$session_dir")"
+where=""
+case "$dir" in
+    /|[A-Za-z]:) where="a filesystem root" ;;
+esac
+for home in "${HOME:-}" "${USERPROFILE:-}"; do
+    if [ -n "$home" ] && [ "$dir" = "$(normalize_path "$home")" ]; then
+        where="the user's home directory"
+    fi
+done
+
+session_note=""
+if [ -n "$where" ]; then
+    session_note="
+SESSION DIRECTORY: this session started in ${where} (${session_dir}), which is not a project. Before creating journals or any other file, ask the user which folder is the project.
+"
+fi
+
+standard="$(read_context context/documentation-standard.md)"
+kit_map="$(read_context context/kit-map.md)"
+
+context="<evisions_kit>
+The evisions plugin is active. Its documentation standard and kit map below apply to this whole session.
+${session_note}
+${standard}
+
+${kit_map}
+</evisions_kit>"
+
+# printf rather than a heredoc, which has been reported to hang hooks under bash 5.3.
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "$(escape_for_json "$context")"
+
+exit 0
