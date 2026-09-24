@@ -1,0 +1,7 @@
+{
+  "name": "evisions",
+  "version": "1.0.0",
+  "description": "Working discipline for eVisions: session checkpoints and closing, WORKSTATE and worklog journals, feature docs, decision log and ADRs, a prompt engineer with a sanity check, research agents and Socratic brainstorming. Optional public companion plugins are installed separately from their authors.",
+  "author": { "name": "Hradni.AI" },
+  "keywords": ["documentation", "decisions", "adr", "prompt-engineering", "research", "brainstorming"]
+}

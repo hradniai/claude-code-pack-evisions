@@ -1,0 +1,42 @@
+Copyright (c) 2026 Šimon Hradní. All rights reserved.
+
+This repository is shared publicly so that authorized individuals can install
+the Claude Code plugin it contains on their machines and use it as a working
+tool in their daily work, including work performed in the course of their
+employment or engagement.
+
+Authorized individuals are:
+  - employees and contractors of eVisions Advertising s.r.o., and
+  - other persons authorized in writing by the copyright holder.
+
+Authorized individuals may:
+  - View the source code in this repository.
+  - Clone the repository and install the plugin on machines they use for
+    their work, including work on client projects and internal projects.
+  - Use the plugin as part of their daily Claude Code setup on those
+    machines.
+  - Modify their local copy to fit their workflow.
+  - Pull updates from this repository to refresh their installation.
+
+Without prior written permission from the copyright holder, no one may:
+  - Redistribute, republish, mirror, rehost, or otherwise share this
+    repository or any part of it outside the authorized audience. The "fork"
+    button on GitHub remains technically functional; that is a platform
+    limitation, not a permission.
+  - Use the plugin as the basis for a derivative work that is published,
+    sold, sublicensed, or otherwise made available to third parties.
+  - Package the plugin, or a recognisable derivative of it, into a product
+    or service offering.
+  - Use the source code or contents for training machine learning models.
+
+The intent of this license: people who are authorized to use the plugin can
+use it freely as a working tool. Taking it and turning it into something of
+one's own, or passing it on outside the authorized audience, requires asking
+first.
+
+Optional companion plugins named in the documentation are not part of this
+repository. They are installed from their authors' own sources and are
+governed by their authors' licenses.
+
+For permission to use this work in ways not covered above, contact:
+simon@hradni.net

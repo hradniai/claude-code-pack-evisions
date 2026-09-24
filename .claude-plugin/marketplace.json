@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-pack-evisions",
+  "description": "Claude Code plugins for the eVisions team.",
+  "owner": { "name": "Hradni.AI" },
+  "plugins": [
+    {
+      "name": "evisions",
+      "description": "Working discipline for eVisions: session checkpoints and closing, WORKSTATE and worklog journals, feature docs, decision log and ADRs, a prompt engineer with a sanity check, research agents and Socratic brainstorming. Optional public companion plugins are installed separately from their authors.",
+      "version": "1.0.0",
+      "source": "./plugins/evisions",
+      "category": "productivity"
+    }
+  ]
+}

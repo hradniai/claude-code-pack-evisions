@@ -1,0 +1,139 @@
+# User manual: the evisions kit for Claude Code
+
+Claude Code (the app in which Claude reads and edits the files in your project directly) remembers nothing from earlier conversations. When a conversation gets long, its older part is also condensed automatically into a short summary, and details get lost. The `evisions` kit solves this simply: while you work, Claude writes the state of the work, its history and the decisions into plain text files inside the project. Tomorrow you, a colleague or a new conversation can pick up from them. The kit also adds a few helpers: research with sources, prompt writing with a check, and a sparring partner for your own ideas. It does not change what Claude is allowed to do. Your existing settings and safety rules stay as they are.
+
+You can talk to Claude in Czech, English or any other language. The files the kit writes into your project are always in English, so everyone on the team can read them.
+
+## A normal day
+
+1. **Start Claude Code in your project.** The kit loads by itself. At the start, Claude receives the rules for keeping records and a map of its helpers. There is nothing to switch on.
+2. **Work as usual, in your own language.** Give tasks the way you always do. While working, Claude keeps `WORKSTATE.md` up to date with the current state and adds what was done to `worklog.md`.
+3. **After a finished step, type `/checkpoint`.** You type a command into Claude Code like a normal message, slash included. Claude records what happened since the last save and refreshes the state. If the project uses git (a tool that keeps the history of file versions), Claude also saves a new version, called a commit. A commit stays on your machine and can be undone. Nothing is sent anywhere. It takes a few seconds.
+4. **At the end of your work, type `/end`.** Claude first shows you the decisions it noticed during the session and asks which ones to record. It records only the ones you confirm. Then it updates the history and the state, updates the description of the project's features and saves a version. Before it sends anything to a shared server (called a push, for example to GitHub), it asks you.
+
+Coming back to a project after a week? Just write "Where did we leave off?" Claude reads `WORKSTATE.md` and continues from there.
+
+## The files in your project
+
+The kit creates files only when they are needed. They are all plain text in Markdown format (text with simple marks for headings and lists), so you can open them in any editor.
+
+| File | What it is for | Should you read it? |
+|---|---|---|
+| `WORKSTATE.md` | The current state: what is being worked on, what works, what is stuck, what comes next and which decisions are waiting for confirmation. It is short, and Claude rewrites it. | Yes, when you return to a project after a break or take it over from someone. |
+| `worklog.md` | The history of what was done when, and why, newest entry at the top. Nothing is ever deleted from it. | Only when you are looking for when and why something happened. |
+| `docs/decision-log.md` | Smaller decisions, one per row. | When you wonder why something is the way it is. |
+| `docs/decisions/` | ADRs: detailed records of big decisions, one file per decision. | When you revisit a decision or want to change it. |
+| `docs/features/` | A description of the project's features, based on what the code actually does. Appears mostly in projects with code. | When you need to understand what the project can do. |
+| `research/` | Research results with sources. | Yes, they are for you. |
+| `prompts/` | Prompts Claude wrote for you. | Yes. |
+
+Passwords and access keys never go into these files. At most, Claude names the setting under which a key is stored, never the key itself.
+
+## Recording a decision
+
+Just say it. For example: "We decided to send monthly reports to clients as a PDF by the fifth day of the month." Claude records the decision. If it is not sure whether this is a settled decision or only an idea, it makes a note and asks you about it at `/end`. Only what you decide or confirm goes into the records, never Claude's own conclusions.
+
+Decisions are recorded in two ways.
+
+**A row in the decision log** (`docs/decision-log.md`) says in one sentence what applies and why. It suits everyday decisions that are easy to change, and it is the default. Examples: "We send the client report as a PDF by the 5th of each month, because the client prints it for their management." Or: "We build client reports in Looker Studio rather than Power BI, because clients know it and it is free."
+
+**An ADR** (Architecture Decision Record) is a separate file in the `docs/decisions/` folder. It is for a decision where you consciously rejected other options and which is also hard to reverse, or whose reason is not obvious at first sight. An ADR captures the context, the decision itself, the rejected options and the consequences. Example: "All new automations are built in n8n instead of Make. We considered staying with Make or moving to Zapier. Self-hosting (running it on our own server) and the lower price decided it. Going back would mean rewriting dozens of scenarios." When someone suggests another tool six months later, the ADR shows why it went this way and what was considered back then.
+
+Claude records reasons and rejected options only as you state them. If you give no reason, it writes "not stated" and does not make one up.
+
+An ADR is created when you type `/adr` or say "record this as an ADR". An old ADR is never rewritten. When you change a decision, a new ADR is created and the old one gets a link to it. Not sure where a decision belongs? Don't worry about it. Claude suggests, you confirm.
+
+## Research
+
+Write, for example, "Research how agencies use AI for writing ad copy", or type `/research` followed by your question. The research is done by a research agent (another Claude that runs on its own, searches and reads sources on the web, and returns the result). A narrow question needs one. A broad question is split by a research lead (an agent that coordinates the others) into several angles. It sends an agent to each, at most five at once, and combines the results.
+
+You get:
+
+- a verdict right at the top, the answer to your question in one or two sentences,
+- the findings, with a link to the source next to each claim,
+- a file in the `research/` folder named after the topic and the date, so the team can still find it a month later.
+
+Each finding carries a label that tells you how much to trust it:
+
+- **MEASURED**: Claude tried it itself, or a source documents it for exactly your case. The strongest level.
+- **COMMUNITY-PROVEN**: someone actually built or used it and publicly reported that it works. The claim says who, with a link.
+- **MY JUDGMENT**: Claude's own conclusion from what it found. Treat it as an opinion, not a fact.
+
+When the research finds nothing on a point, it says so and does not fill the gap. Open and read the links behind any claim you base a decision on.
+
+## Prompts
+
+A prompt is the instruction given to an AI model, for example the instructions for a chatbot on a client's website, or a template an automation uses to write product descriptions. Write "Write me a prompt for…" or "Improve this prompt", and the prompt engineer takes over (an agent that specializes in writing prompts). The more you tell it at the start (what the prompt is for, where its inputs come from and what the result should look like), the better. It cannot ask you questions while it works, so it fills gaps with reasonable assumptions and lists them for you to correct. It saves the prompt in the `prompts/` folder and checks it straight away. The prompt itself is written in English, but it can tell the model to answer in Czech or any other language. You can also run the check on any prompt yourself with `/prompt-eval`.
+
+The result of the check looks like this:
+
+```
+SANITY: PASS
+QUALITY: UNEVALUATED
+```
+
+**SANITY** is a check of the text alone. No model is run. It looks for things like a pasted key or password, no description of what the output should look like, no instruction for what to do when an input is missing or unusable, and places where inserted data is not separated from the instructions. PASS means it found none of these. WARN means something is missing. FAIL means a problem that must be fixed, typically a key in the text.
+
+**QUALITY: UNEVALUATED** says honestly that nobody has tested whether the prompt does its job. A prompt that passes can still give bad results.
+
+So before you put a prompt to use, try it on 3-5 real inputs, including one empty or incomplete one, and compare the results with what a good output should look like. Keep clients' personal data out of test inputs.
+
+## Thinking an idea through, or testing a plan?
+
+Both helpers ask questions, each with a different goal. Sparring is part of the kit. Grilling is an optional add-on by another author (see Add-ons from other authors).
+
+**Socratic sparring** (`/socratic-brainstormer`) is for a raw idea you want to think through. Claude does not hand you a finished solution. It asks so that the answer comes from you, develops what occurs to you and points out blind spots. You could start like this: "I'm thinking of offering online shops a monthly audit of their ad accounts. Help me think it through."
+
+**Grilling** (`/grill-me`, only with the add-on) is for a finished plan or decision you want to test before you commit to it. Claude asks in rounds. It asks every question that can already be answered, suggests its own answer to each, and continues until nothing in the plan is left unclear. You could start like this: "/grill-me Here is the plan for launching a client's Q4 campaign: …"
+
+There can be dozens of questions. If you prefer one question at a time, say so right at the start: "Ask me one question at a time." Start grilling in a new conversation, and do not just nod along. When you disagree or do not know the answer, say so. Otherwise the plan that comes out is Claude's, not yours.
+
+A simple rule: when you do not yet know what you want, choose sparring. When you know and want to find out whether it holds up, choose grilling.
+
+## Add-ons from other authors
+
+Three public add-ons fit the kit. They are not part of it. Each one is installed separately, straight from its author, and only if you want it. Claude offers them during installation and installs each one only after you say yes.
+
+- **Superpowers** (for building software) is a disciplined way to build software or automations with Claude: first brainstorming, then a written spec, a plan and its execution, plus systematic bug hunting and writing tests. At the start of every conversation Claude loads its rules and then reaches for skills (packages of instructions for specific tasks) more readily. That is expected. It is how the add-on works.
+- **Replan** (checking a plan and the result, by Jiří George Dolejš) adds two commands. `/replan` sends a finished plan to several reviewing agents at once, before any work starts. `/recheck` checks afterwards that the result matches the plan.
+- **Grilling** (by Matt Pocock) is `/grill-me`, described above.
+
+Use Socratic sparring while an idea is still taking shape and you want to develop it. Grilling comes in when you already have a plan or decision and want to pin it down and test it with questions. When the plan turns into building software or an automation, Superpowers helps. `/replan` and `/recheck` check the written plan before work starts, and then the finished result against it.
+
+## Frequently asked questions
+
+**A command does not show up in the menu.** Quit Claude Code and start it again. The kit loads at startup, so a restart is needed after installing or updating.
+
+**`/checkpoint` runs my own skill, not the kit's.** A skill is a package of instructions Claude loads when you call it. If you have your own with the same name, type the full name of the kit's one, `/evisions:checkpoint`. With the `evisions:` prefix, every command of the kit always works.
+
+**Where do files go on the server containers?** A container is your own separate environment on the company server. Files go where the server's rules allow. If they allow writing only into a certain folder, Claude saves the files there and tells you once where exactly. The server's rules always take precedence over the kit.
+
+**The prompt check says NOT RUN.** Python 3.9 or newer, the program the check runs with, is missing on the machine. Install it, or ask whoever manages your machine or container.
+
+**Will Claude send anything out without my knowing?** No. `/checkpoint` and `/end` save versions only on your machine. Nothing goes to a shared server until you answer "yes" to the question in `/end`.
+
+**`/grill-me` does not show up in the menu.** Grilling is an add-on that is installed separately. Tell Claude "Install grilling following INSTRUCTIONS.md" and then restart Claude Code.
+
+**Do I have to talk to Claude in English?** No. Use Czech or any other language. The files in your project are written in English so the whole team can read them.
+
+## Installing and updating
+
+The kit is a plugin (an add-on for Claude Code). Everyone installs it for themselves, on their own laptop or container. It takes a few minutes and needs no special access, because the repository (the kit's folder with its version history) is public on GitHub. There are two ways.
+
+**Let Claude do it.** Download the repository with `git clone https://github.com/hradniai/claude-code-pack-evisions`, open Claude Code in that folder and write "Install it following INSTRUCTIONS.md." Claude shows you each command before running it and waits for your yes. It also offers the three optional add-ons and installs only the ones you pick.
+
+**Or run two commands yourself** in a terminal (the window where you type commands):
+
+```
+claude plugin marketplace add https://github.com/hradniai/claude-code-pack-evisions
+claude plugin install evisions@claude-code-pack-evisions
+```
+
+Then restart Claude Code.
+
+To update, run these two commands and restart Claude Code again:
+
+```
+claude plugin marketplace update claude-code-pack-evisions
+claude plugin update evisions@claude-code-pack-evisions
+```
