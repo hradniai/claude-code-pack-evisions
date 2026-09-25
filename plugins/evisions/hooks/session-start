@@ -34,6 +34,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
+# --- json string field: keep identical in hooks/session-start and hooks/safety-start ---
 # Print the string value of key $2 in the JSON text $1, without jq. Copies characters up to the closing
 # quote and turns an escaped character into itself (\\ -> \, \" -> "), which is enough for a path.
 json_string_field() {
@@ -60,6 +61,7 @@ json_string_field() {
     done
     return 1
 }
+# --- end of json string field ---
 
 # Backslashes to slashes, trailing separators removed ("C:\Users\jana\" -> "C:/Users/jana", "/" stays).
 normalize_path() {

@@ -546,6 +546,13 @@ class BaselineTests(unittest.TestCase):
                 self.assertFalse(rule.startswith("Task"), "an unanchored tool-name glob is skipped at load")
                 self.assertFalse(rule.startswith("Write("), "Write(path) rules are dead; Edit(path) gates every edit tool")
 
+    def test_bypass_mode_is_left_alone(self) -> None:
+        # Since 1.2.0 the baseline never locks bypass mode; the installer only takes back the 1.1.0 lock.
+        data = self.load_baseline()
+        self.assertNotIn("bypassLock", data)
+        visible = json.dumps({key: value for key, value in data.items() if not key.startswith("_")})
+        self.assertNotIn("disableBypassPermissionsMode", visible)
+
     def test_no_value_that_voids_the_settings_file(self) -> None:
         text = (PLUGIN_ROOT / "settings" / "baseline.json").read_text(encoding="utf-8")
         self.assertNotRegex(text, r'"cleanupPeriodDays"\s*:\s*0\b', "cleanupPeriodDays 0 fails validation")

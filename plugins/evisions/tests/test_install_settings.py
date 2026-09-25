@@ -5,6 +5,7 @@ Hermetic: every run passes --config-dir and --managed-dir pointing at temporary 
 CLAUDE_CONFIG_DIR is removed from the environment, so the real ~/.claude is never read or written.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -150,7 +151,7 @@ class ApplyTest(InstallerTestCase):
         self.assertEqual(data["permissions"]["allow"], ALLOW)
         self.assertEqual(data["permissions"]["deny"], DENY)
         self.assertEqual(data["permissions"]["ask"], ASK)
-        self.assertEqual(data["permissions"]["disableBypassPermissionsMode"], "disable")
+        self.assertNotIn("disableBypassPermissionsMode", data["permissions"], "bypass mode is left alone")
         for key, value in SETTINGS.items():
             self.assertEqual(data[key], value)
         self.assertEqual(data["env"], ENV)
@@ -283,7 +284,7 @@ class RefusalTest(InstallerTestCase):
 
 
 class ProfileTest(InstallerTestCase):
-    def test_managed_profile_adds_no_permissions_no_bypass_lock_and_no_env(self):
+    def test_managed_profile_adds_no_permissions_and_no_env(self):
         policy = self.managed_policy()
         result = self.ok("--apply", managed_dir=policy)
         data = self.data()
@@ -294,7 +295,7 @@ class ProfileTest(InstallerTestCase):
         self.assertIn("statusLine", data)
         self.assertEqual(set(data), set(SETTINGS) | {"statusLine"})
         self.assertIn("Profile: managed", result.stdout)
-        self.assertIn("the administrator's policy owns permissions and bypass mode", result.stdout)
+        self.assertIn("the administrator's policy owns permissions", result.stdout)
         self.assertIn("the administrator's environment owns telemetry", result.stdout)
         self.assertNotIn("DISABLE_TELEMETRY", result.stdout)
         record = load(self.config / RECORD)
@@ -326,7 +327,7 @@ class ProfileTest(InstallerTestCase):
     def test_profile_flag_overrides_detection(self):
         policy = self.managed_policy()
         self.ok("--apply", "--profile", "standard", managed_dir=policy)
-        self.assertEqual(self.data()["permissions"]["disableBypassPermissionsMode"], "disable")
+        self.assertEqual(self.data()["permissions"]["deny"], DENY)
 
     def test_switch_from_standard_to_managed_takes_back_permissions_and_env(self):
         self.write_settings({"permissions": {"allow": ["Bash(foo *)"]}, "env": {"MY_VAR": "x"}})
@@ -360,9 +361,9 @@ class ExistingValuesTest(InstallerTestCase):
         self.assertEqual(data["cleanupPeriodDays"], 30)
         self.assertEqual(data["env"]["DISABLE_TELEMETRY"], "0")
         self.assertEqual(data["env"]["DISABLE_ERROR_REPORTING"], ENV["DISABLE_ERROR_REPORTING"])
-        self.assertEqual(data["permissions"]["disableBypassPermissionsMode"], "custom")
+        self.assertEqual(data["permissions"]["disableBypassPermissionsMode"], "custom", "a user value is never touched")
         self.assertIn("Left as you have them", result.stdout)
-        self.assertIn("permissions.disableBypassPermissionsMode: you have", result.stdout)
+        self.assertIn("cleanupPeriodDays: you have", result.stdout)
         record = load(self.config / RECORD)
         for key in ("cleanupPeriodDays", "env.DISABLE_TELEMETRY", "permissions.disableBypassPermissionsMode"):
             self.assertNotIn(key, record["set"])
@@ -736,7 +737,7 @@ class RecordAndCheckTest(InstallerTestCase):
         self.assertEqual(record["added"]["permissions.allow"], ALLOW)
         self.assertEqual(record["added"]["permissions.deny"], DENY)
         self.assertEqual(record["added"]["permissions.ask"], ASK)
-        self.assertEqual(record["set"]["permissions.disableBypassPermissionsMode"], "disable")
+        self.assertNotIn("permissions.disableBypassPermissionsMode", record["set"])
         self.assertEqual(record["set"]["cleanupPeriodDays"], SETTINGS["cleanupPeriodDays"])
         self.assertEqual(record["set"]["env.DISABLE_TELEMETRY"], ENV["DISABLE_TELEMETRY"])
         self.assertIn("statusLine", record["set"])
@@ -769,6 +770,227 @@ class RecordAndCheckTest(InstallerTestCase):
         self.assertEqual(list(self.config.iterdir()), [])
 
 
+BYPASS_KEY = "disableBypassPermissionsMode"
+# The two allow rules 1.1.0 shipped that the official settings schema does not accept.
+SCHEMA_REJECTED_110 = ("ListMcpResourcesTool", "ReadMcpResourceTool")
+
+
+def baseline_110(data):
+    """Turn the current baseline back into the 1.1.0 shape: the bypass lock and the two MCP rules."""
+    data["permissions"]["allow"].extend(SCHEMA_REJECTED_110)
+    data["bypassLock"] = {BYPASS_KEY: "disable"}
+
+
+def load_engine_module():
+    spec = importlib.util.spec_from_file_location("install_settings_under_test", ENGINE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class UpgradeFrom110Test(InstallerTestCase):
+    """1.1.0 wrote the bypass-mode lock and two schema-rejected allow rules; the next apply takes them back."""
+
+    def apply_110(self):
+        return self.ok("--apply", "--baseline", str(self.custom_baseline(baseline_110)))
+
+    def test_upgrade_takes_back_the_lock_and_the_two_rules(self):
+        user = {"model": "opus", "permissions": {"allow": ["Bash(foo *)"]}}
+        self.write_settings(user)
+        self.apply_110()
+        data = self.data()
+        self.assertEqual(data["permissions"][BYPASS_KEY], "disable")
+        for rule in SCHEMA_REJECTED_110:
+            self.assertIn(rule, data["permissions"]["allow"])
+        self.assertEqual(load(self.config / RECORD)["set"][f"permissions.{BYPASS_KEY}"], "disable")
+
+        preview = self.ok()
+        for rule in SCHEMA_REJECTED_110:
+            self.assertIn(rule, preview.stdout)
+        self.assertIn("no longer in the baseline", preview.stdout)
+        self.assertIn(f"permissions.{BYPASS_KEY}", preview.stdout)
+        self.assertIn("--dangerously-skip-permissions skips the questions again", preview.stdout)
+
+        self.ok("--apply")
+        data = self.data()
+        self.assertNotIn(BYPASS_KEY, data["permissions"])
+        self.assertEqual(data["permissions"]["allow"], ["Bash(foo *)"] + ALLOW)
+        record = load(self.config / RECORD)
+        self.assertNotIn(f"permissions.{BYPASS_KEY}", record["set"])
+        self.assertNotIn(f"permissions.{BYPASS_KEY}", record["declined"])
+        for rule in SCHEMA_REJECTED_110:
+            self.assertNotIn(rule, record["added"]["permissions.allow"])
+        result = self.ok("--check")
+        self.assertIn("Settings file check: no problems found.", result.stdout)
+
+        self.ok("--remove")
+        self.assertEqual(self.data(), user)
+
+    def test_a_lock_the_user_set_before_is_never_touched(self):
+        self.write_settings({"permissions": {BYPASS_KEY: "disable"}})
+        self.apply_110()
+        self.assertNotIn(f"permissions.{BYPASS_KEY}", load(self.config / RECORD)["set"], "the user's value")
+        self.ok("--apply")
+        self.assertEqual(self.data()["permissions"][BYPASS_KEY], "disable")
+        self.ok("--remove")
+        self.assertEqual(self.data(), {"permissions": {BYPASS_KEY: "disable"}})
+
+    def test_a_lock_the_user_adds_after_the_upgrade_stays(self):
+        self.apply_110()
+        self.ok("--apply")
+        data = self.data()
+        data["permissions"][BYPASS_KEY] = "disable"
+        self.write_settings(data)
+        result = self.ok("--apply")
+        self.assertIn("Nothing to change", result.stdout)
+        self.assertEqual(self.data()["permissions"][BYPASS_KEY], "disable")
+        self.ok("--remove")
+        self.assertEqual(self.data(), {"permissions": {BYPASS_KEY: "disable"}})
+
+    def test_a_declined_lock_leaves_the_record(self):
+        self.apply_110()
+        data = self.data()
+        del data["permissions"][BYPASS_KEY]
+        self.write_settings(data)
+        self.ok("--apply", "--baseline", str(self.custom_baseline(baseline_110)))
+        self.assertIn(f"permissions.{BYPASS_KEY}", load(self.config / RECORD)["declined"])
+        self.ok("--apply")
+        self.assertNotIn(BYPASS_KEY, self.data()["permissions"])
+        self.assertNotIn(f"permissions.{BYPASS_KEY}", load(self.config / RECORD)["declined"])
+
+
+class WholeFileCheckTest(InstallerTestCase):
+    """--check validates the user's whole settings file, not only what the baseline added."""
+
+    def check(self):
+        return self.run_engine("--check")
+
+    def findings(self, stdout):
+        return [line.strip() for line in stdout.splitlines() if line.startswith(("  Error:", "  Warning:"))]
+
+    def test_generated_files_have_no_finding(self):
+        for profile in ("standard", "managed"):
+            with self.subTest(profile=profile):
+                if self.settings.exists():
+                    self.ok("--remove")
+                self.ok("--apply", "--profile", profile)
+                result = self.ok("--check")
+                self.assertEqual(self.findings(result.stdout), [])
+                self.assertIn("Settings file check: no problems found.", result.stdout)
+                self.assertIn(f"baseline installed (version {VERSION}, profile {profile})", result.stdout)
+
+    def test_every_baseline_rule_matches_the_schema_pattern(self):
+        # Editors that validate settings.json against the official schema flag any other rule.
+        pattern = load_engine_module().SCHEMA_RULE
+        for rule in ALLOW + DENY + ASK:
+            with self.subTest(rule=rule):
+                self.assertRegex(rule, pattern)
+        for rule in SCHEMA_REJECTED_110:
+            self.assertNotRegex(rule, pattern)
+
+    def test_errors_fail_the_check_with_the_baseline_installed(self):
+        self.ok("--apply")
+        data = self.data()
+        data["permissions"]["deny"].append("Bash(foo *)x")
+        self.write_settings(data)
+        before = snapshot(self.config)
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('Error: permissions.deny rule "Bash(foo *)x" has text after the closing parenthesis', result.stdout)
+        self.assertIn(f"baseline installed (version {VERSION}, profile standard)", result.stdout)
+        self.assertIn("The settings file has errors", result.stdout)
+        self.assertEqual(snapshot(self.config), before, "--check must write nothing")
+
+    def test_warnings_keep_exit_zero(self):
+        self.ok("--apply")
+        data = self.data()
+        data["permissions"]["allow"].append("ListMcpResourcesTool")
+        data["attribution"] = False
+        self.write_settings(data)
+        result = self.ok("--check")
+        self.assertIn('Warning: permissions.allow rule "ListMcpResourcesTool": "ListMcpResourcesTool" is not a tool name', result.stdout)
+        self.assertIn("editors that check settings.json", result.stdout)
+        self.assertIn('Warning: Your file sets "attribution" to false', result.stdout)
+        self.assertIn("0 errors, 2 warnings", result.stdout)
+
+    def test_each_problem_gets_its_own_line(self):
+        cases = [
+            ("deny", "Bash(foo *)x", "Error", "text after the closing parenthesis"),
+            ("deny", "Bash()", "Error", "empty parentheses"),
+            ("deny", 42, "Error", "is not a non-empty text"),
+            ("ask", "", "Error", "is not a non-empty text"),
+            ("deny", "Bash(ls * | wc)", "Warning", "contains '|'"),
+            ("deny", "Write(~/.bashrc)", "Warning", 'Use "Edit(~/.bashrc)" instead'),
+            ("ask", " Bash(x *)", "Warning", "leading or trailing spaces"),
+            ("allow", "Task*", "Warning", "Claude Code skips such an allow rule"),
+            ("allow", "ReadMcpResourceTool", "Warning", "is not a tool name the official settings schema lists"),
+            ("deny", "Bash(echo (a))", "Warning", "the part in parentheses"),
+        ]
+        fine = ["Write", "Write(~/x)", "mcp__srv__*", "mcp__github__search", "Bash(npm run *)", "Edit(~/.zshrc)"]
+        data = {"permissions": {"allow": ["Write(~/x)", "mcp__srv__*"], "deny": ["mcp__*"], "ask": ["Write", "Bash(npm run *)"]}}
+        for name, rule, _, _ in cases:
+            data["permissions"].setdefault(name, []).append(rule)
+        data["permissions"]["deny"] += ["mcp__github__search", "Edit(~/.zshrc)"]
+        self.write_settings(data)
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        found = self.findings(result.stdout)
+        self.assertEqual(len(found), len(cases), "\n".join(found))
+        for name, rule, severity, fragment in cases:
+            with self.subTest(rule=rule):
+                line = next((line for line in found if f"permissions.{name} rule {json.dumps(rule)}" in line), None)
+                self.assertIsNotNone(line, f"no line for {rule!r}")
+                self.assertTrue(line.startswith(f"{severity}:"), line)
+                self.assertIn(fragment, line)
+        for rule in fine:
+            self.assertFalse([line for line in found if json.dumps(rule) in line], rule)
+        self.assertIn("4 errors, 6 warnings", result.stdout)
+
+    def test_values_that_void_the_file_are_errors(self):
+        self.write_settings({"cleanupPeriodDays": 0, "feedbackSurveyRate": 2})
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error: Your file sets cleanupPeriodDays to 0", result.stdout)
+        self.assertIn("Error: Your file sets feedbackSurveyRate to 2", result.stdout)
+
+    def test_broken_file_is_an_error_line_without_traceback(self):
+        for content, fragment in (
+            ('{"model": "opus",', "Error: The file is not valid JSON (line 1, column"),
+            ("[]", "Error: The file holds a list at the top level"),
+            ('{"feedbackSurveyRate": NaN}', "Error: The file is not valid JSON"),
+            ('{"permissions": ["Read"]}', 'Error: "permissions" is a list'),
+            ('{"permissions": {"deny": "Read"}}', 'Error: "permissions.deny" is a text value'),
+            ('{"env": []}', 'Error: "env" is a list'),
+        ):
+            with self.subTest(content=content):
+                self.settings.write_text(content, encoding="utf-8")
+                result = self.check()
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(fragment, result.stdout)
+
+    def test_invalid_json_stops_before_the_baseline(self):
+        self.ok("--apply")
+        self.settings.write_text("{", encoding="utf-8")
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot be checked until the settings file is valid JSON", result.stdout)
+        self.assertNotIn("baseline installed", result.stdout)
+
+    def test_a_valid_file_without_the_baseline(self):
+        self.write_settings({"model": "opus"})
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Settings file check: no problems found.", result.stdout)
+        self.assertIn("not installed", result.stdout)
+
+    def test_no_settings_file(self):
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("It does not exist yet", result.stdout)
+        self.assertEqual(list(self.config.iterdir()), [])
+
+
 RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
@@ -779,7 +1001,6 @@ class FailedWriteTest(InstallerTestCase):
         self.assertEqual(data["permissions"]["allow"], ALLOW)
         self.assertEqual(data["permissions"]["deny"], DENY)
         self.assertEqual(data["permissions"]["ask"], ASK)
-        self.assertEqual(data["permissions"]["disableBypassPermissionsMode"], "disable")
         self.assertEqual(data["env"], ENV)
 
     def assert_no_declines(self):

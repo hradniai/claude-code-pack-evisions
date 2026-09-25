@@ -25,6 +25,6 @@ A safety check runs before every Bash, PowerShell, Read and Grep call; its block
 
 - Never edit Claude Code settings to loosen a permission, allow a denied command or disable a hook, because that removes the boundary for every later session; such changes are the user's to make.
 - If a block message says Python 3 was not found, tell the user in plain words that the safety check needs Python 3.9 or newer and that Bash and file reads stay blocked until it is installed, then stop.
-- The safety settings baseline is managed with `evisions-settings` (no flag = dry run, `--check`, `--apply`, `--remove`); run `--apply` or `--remove` only when the user asks.
+- The safety settings baseline is managed with `evisions-settings` (no flag = dry run, `--check`, `--apply`, `--remove`); run `--apply` or `--remove` only when the user asks. `--check` is read-only and also lists every problem in the user's whole settings file, one line each; explain them, and change the file only when the user asks.
 
 </safety_protocol>

@@ -7,15 +7,22 @@
 #   of the conversation, not after the first unexplained block.
 # - SETTINGS BASELINE when the optional settings baseline (evisions-settings) was never applied, so
 #   Claude can point to it when the user asks about safety or setup.
+# - CLAUDE CODE VERSION at session startup when the running Claude Code is older than the newest
+#   published version (npm registry dist-tags; the `stable` tag when the user's settings choose that
+#   release channel), plus a systemMessage the user sees. The published version is cached for 6 hours
+#   in the plugin's data directory, so most starts make no network call; a failed lookup is cached for
+#   1 hour. Offline, without curl, or with an unreadable answer there is no warning; only when the
+#   running version is unknown too does one neutral line say that the version could not be checked.
 # With the argument `codex` (hooks/codex-hooks.json) it emits the Codex variant instead: the protocol
 # from context/safety-codex.md, the absolute paths of the plugin's tools (Codex does not put the
 # plugin's bin/ folder on PATH, and the safety check allows list-env-keys by exactly that path), and a
 # SETTINGS BASELINE line when the Codex baseline (evisions-codex-settings) was never applied. On
 # Windows, codex-hooks.json runs hooks/codex_context.py instead, which prints the same JSON.
-# Plain bash only (no jq, no python) so it runs unchanged on Linux, macOS (bash 3.2) and Git Bash on
-# Windows. It always exits 0 because a failing hook must never block a session: a missing context file
-# becomes a one-line notice instead of an error. Claude Code caps additionalContext at 10,000
-# characters, so everything injected must stay under it (tests/test_safety_start.py checks).
+# Plain bash only (no jq, no python; the version check calls curl and claude, both optional) so it runs
+# unchanged on Linux, macOS (bash 3.2) and Git Bash on Windows. It always exits 0 because a failing
+# hook must never block a session: a missing context file becomes a one-line notice instead of an
+# error. Claude Code caps additionalContext at 10,000 characters, so everything injected must stay
+# under it (tests/test_safety_start.py checks).
 
 # Backslashes to slashes first: on Windows the plugin root can arrive as C:\...\hooks\safety-start.
 self="${BASH_SOURCE[0]:-$0}"
@@ -67,9 +74,194 @@ find_python() {
 }
 # --- end of interpreter search ---
 
-# The hook input is not needed; read it so Claude Code never writes into a pipe nobody reads.
+# --- json string field: keep identical in hooks/session-start and hooks/safety-start ---
+# Print the string value of key $2 in the JSON text $1, without jq. Copies characters up to the closing
+# quote and turns an escaped character into itself (\\ -> \, \" -> "), which is enough for a path.
+json_string_field() {
+    local rest="${1#*\"$2\"}" value="" ch
+    [ "$rest" = "$1" ] && return 1
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [ "${rest:0:1}" = ":" ] || return 1
+    rest="${rest:1}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [ "${rest:0:1}" = '"' ] || return 1
+    rest="${rest:1}"
+    while [ -n "$rest" ]; do
+        ch="${rest:0:1}"
+        if [ "$ch" = '\' ]; then
+            value="${value}${rest:1:1}"
+            rest="${rest:2}"
+        elif [ "$ch" = '"' ]; then
+            printf '%s' "$value"
+            return 0
+        else
+            value="${value}${ch}"
+            rest="${rest:1}"
+        fi
+    done
+    return 1
+}
+# --- end of json string field ---
+
+# --- Claude Code version check ---
+DIST_TAGS_URL="https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags"
+VERSION_CACHE_SECONDS=21600
+VERSION_RETRY_SECONDS=3600
+
+# True when $1 is a version made of dot-separated numbers, each at most nine digits.
+is_version() {
+    case "$1" in
+        '' | .* | *. | *..* | *[!0-9.]* | *[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+# True when version $1 is older than version $2, compared numerically part by part (2.1.99 < 2.1.100).
+version_older() {
+    local a="$1" b="$2" x y
+    while [ -n "$a" ] || [ -n "$b" ]; do
+        x="${a%%.*}"
+        y="${b%%.*}"
+        if [ "$x" = "$a" ]; then a=""; else a="${a#*.}"; fi
+        if [ "$y" = "$b" ]; then b=""; else b="${b#*.}"; fi
+        x=$((10#${x:-0}))
+        y=$((10#${y:-0}))
+        [ "$x" -lt "$y" ] && return 0
+        [ "$x" -gt "$y" ] && return 1
+    done
+    return 1
+}
+
+# Run a command for at most $1 seconds and print its output. bash 3.2 has no timeout builtin and macOS
+# no timeout command, so without one a watchdog stops the command. The output goes through a temporary
+# file, not a pipe: a child process the command left behind would otherwise keep the pipe of the
+# caller's command substitution open, and the hook would wait for it after all.
+run_limited() {
+    local seconds="$1" out pid watchdog status
+    shift
+    out="$(mktemp 2>/dev/null)" || out="${TMPDIR:-/tmp}/evisions-version.$$"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@" > "$out" 2>/dev/null
+        status=$?
+    else
+        "$@" > "$out" 2>/dev/null &
+        pid=$!
+        ( sleep "$seconds" && kill "$pid" ) >/dev/null 2>&1 &
+        watchdog=$!
+        wait "$pid" 2>/dev/null
+        status=$?
+        kill "$watchdog" >/dev/null 2>&1
+    fi
+    cat "$out" 2>/dev/null
+    rm -f "$out" 2>/dev/null
+    return "$status"
+}
+
+# The version the executable $1 reports, e.g. "2.1.282" from "2.1.282 (Claude Code)"; fails for
+# anything that is not Claude Code's own answer.
+claude_version_of() {
+    local out
+    out="$(run_limited 5 "$1" --version </dev/null 2>/dev/null)" || return 1
+    out="${out%%$'\n'*}"
+    out="${out%$'\r'}"
+    case "$out" in
+        *"(Claude Code)"*) ;;
+        *) return 1 ;;
+    esac
+    out="${out%% *}"
+    is_version "$out" || return 1
+    printf '%s' "$out"
+}
+
+# The running Claude Code version. CLAUDE_CODE_EXECPATH names the running executable (measured on
+# 2.1.282; hook input carries no version, and 2.1.199 does not set the variable); without it, the
+# `claude` on PATH, which is the running one unless several installs exist.
+running_claude_version() {
+    local exe="${CLAUDE_CODE_EXECPATH:-}"
+    if [ -n "$exe" ]; then
+        exe="${exe//\\//}"
+        if [ -x "$exe" ] && claude_version_of "$exe"; then
+            return 0
+        fi
+    fi
+    command -v claude >/dev/null 2>&1 && claude_version_of claude
+}
+
+# The release channel the user follows: autoUpdatesChannel in their settings, else the Homebrew cask
+# (claude-code follows stable, claude-code@latest follows latest; the cask path is not measured).
+update_channel() {
+    local settings="$1" text exe link
+    if [ -r "$settings" ]; then
+        text="$(cat "$settings" 2>/dev/null)"
+        if [ "$(json_string_field "$text" autoUpdatesChannel)" = "stable" ]; then
+            printf 'stable'
+            return
+        fi
+    fi
+    exe="${CLAUDE_CODE_EXECPATH:-$(command -v claude 2>/dev/null)}"
+    link="$(readlink "$exe" 2>/dev/null)"
+    case "${exe}|${link}" in
+        */Caskroom/claude-code/*) printf 'stable' ;;
+        *) printf 'latest' ;;
+    esac
+}
+
+# The newest published version of channel $2, from the cache file $1 when it is fresh, else from the
+# npm registry (one request, 3 seconds at most, no retry). A failed request is cached too, so an
+# offline machine waits at most once an hour. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC skips the request.
+newest_published_version() {
+    local cache="$1" channel="$2" now checked_at="" failed="" key value tag_latest="" tag_stable="" body tmp
+    now="$(date +%s 2>/dev/null)"
+    case "$now" in '' | *[!0-9]*) now=0 ;; esac
+    if [ -r "$cache" ]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                checked_at) checked_at="$value" ;;
+                failed) failed="$value" ;;
+                latest) tag_latest="$value" ;;
+                stable) tag_stable="$value" ;;
+            esac
+        done < "$cache"
+    fi
+    # A damaged cache file counts as stale, and a value in it is used only when it is a version.
+    is_version "$tag_latest" || tag_latest=""
+    is_version "$tag_stable" || tag_stable=""
+    case "$checked_at" in '' | *[!0-9]*) checked_at=0 ;; esac
+    local age=$((now - checked_at)) limit="$VERSION_CACHE_SECONDS"
+    [ "$failed" = "1" ] && limit="$VERSION_RETRY_SECONDS"
+    if [ "$checked_at" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -ge "$limit" ]; then
+        tag_latest=""
+        tag_stable=""
+        failed="1"
+        if [ -z "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && command -v curl >/dev/null 2>&1; then
+            body="$(curl -fsS --max-time 3 --connect-timeout 3 --retry 0 "$DIST_TAGS_URL" </dev/null 2>/dev/null)"
+            tag_latest="$(json_string_field "$body" latest)"
+            tag_stable="$(json_string_field "$body" stable)"
+            is_version "$tag_latest" || tag_latest=""
+            is_version "$tag_stable" || tag_stable=""
+            [ -n "$tag_latest" ] && failed=""
+        fi
+        if [ -z "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && mkdir -p "$(dirname "$cache")" 2>/dev/null; then
+            tmp="${cache}.$$"
+            if { printf 'checked_at=%s\nfailed=%s\nlatest=%s\nstable=%s\n' "$now" "$failed" "$tag_latest" "$tag_stable" > "$tmp"; } 2>/dev/null; then
+                mv "$tmp" "$cache" 2>/dev/null
+            fi
+        fi
+    fi
+    if [ "$channel" = "stable" ] && [ -n "$tag_stable" ]; then
+        printf '%s' "$tag_stable"
+    elif [ -n "$tag_latest" ]; then
+        printf '%s' "$tag_latest"
+    else
+        return 1
+    fi
+}
+# --- end of Claude Code version check ---
+
+# The hook input: only its "source" is used (startup, clear, compact).
+hook_input=""
 if [ ! -t 0 ]; then
-    cat >/dev/null 2>&1
+    hook_input="$(cat 2>/dev/null)"
 fi
 
 runtime="${1:-claude}"
@@ -104,6 +296,30 @@ else
 SETTINGS BASELINE: not installed. The user can preview it with \`evisions-settings\` and install it with \`evisions-settings --apply\`. Mention this only if the user asks about safety, permissions or setup."
     fi
     protocol="$(read_context context/safety.md)"
+
+    # The version check runs once per session, at startup (a missing source counts as startup), not
+    # again after /clear or compaction.
+    start_source="$(json_string_field "$hook_input" source)" || start_source=""
+    case "$start_source" in
+        "" | startup)
+            data_dir="${CLAUDE_PLUGIN_DATA:-${config_dir}/evisions}"
+            data_dir="${data_dir//\\//}"
+            channel="$(update_channel "${config_dir}/settings.json")"
+            newest="$(newest_published_version "${data_dir}/claude-code-versions" "$channel")" || newest=""
+            if running="$(running_claude_version)"; then
+                if [ -n "$newest" ] && version_older "$running" "$newest"; then
+                    on_channel=""
+                    [ "$channel" = "stable" ] && on_channel=" on the stable release channel"
+                    status="${status}
+CLAUDE CODE VERSION: this session runs Claude Code ${running}; the newest published version${on_channel} is ${newest}. At the start of the conversation, before anything else, tell the user in their language that an update is available and give them the update commands to run themselves in a terminal, then restart Claude Code: \`claude update\` (native installer), \`npm install -g @anthropic-ai/claude-code@${channel}\` (npm install), \`brew upgrade claude-code\` or \`brew upgrade claude-code@latest\` (Homebrew, whichever cask is installed), \`winget upgrade Anthropic.ClaudeCode\` (WinGet); \`claude doctor\` shows which install this is. Where an administrator manages Claude Code (for example a company server container, where automatic updates are off), updating is the administrator's job: the user asks them."
+                    system_message="evisions: Claude Code ${running} is older than the newest published version${on_channel}, ${newest}. Update it (claude update, or npm install -g @anthropic-ai/claude-code@${channel} for an npm install), then restart Claude Code. Where an administrator manages Claude Code, ask them."
+                fi
+            else
+                status="${status}
+CLAUDE CODE VERSION: the running Claude Code version could not be determined, so it was not compared with the newest published version. Mention this only if the user asks about updates or versions; \`claude --version\` shows it."
+            fi
+            ;;
+    esac
 fi
 
 context="<evisions_safety>
@@ -111,8 +327,14 @@ ${protocol}
 ${tools}${status}
 </evisions_safety>"
 
-# printf rather than a heredoc, which has been reported to hang hooks under bash 5.3.
-printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
-    "$(escape_for_json "$context")"
+# printf rather than a heredoc, which has been reported to hang hooks under bash 5.3. systemMessage is
+# a top-level field Claude Code shows to the user as a warning; SessionStart honours it.
+if [ -n "${system_message:-}" ]; then
+    printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+        "$(escape_for_json "$system_message")" "$(escape_for_json "$context")"
+else
+    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+        "$(escape_for_json "$context")"
+fi
 
 exit 0

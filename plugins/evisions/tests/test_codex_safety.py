@@ -493,6 +493,22 @@ class CodexSafetyStartTest(unittest.TestCase):
         folder.mkdir(parents=True)
         (folder / "codex-settings-applied.json").write_text("{}", encoding="utf-8")
 
+    def test_claude_version_check_does_not_run_for_codex(self):
+        # The Claude variant looks up the newest Claude Code; the Codex variant must neither run
+        # `claude` nor make the request.
+        fakes = self.tmp / "fakes"
+        fakes.mkdir()
+        calls = fakes / "calls"
+        for name in ("claude", "curl"):
+            tool = fakes / name
+            tool.write_text(f'#!{BASH}\necho {name} >> "{calls}"\necho "2.1.1 (Claude Code)"\n', encoding="utf-8")
+            tool.chmod(0o755)
+        env = hermetic_env(self.home, CLAUDE_PLUGIN_DATA=self.tmp / "data")
+        env["PATH"] = f"{fakes}{os.pathsep}{env.get('PATH', '')}"
+        context = parse_context(self, self.run_start(env=env), "SessionStart")
+        self.assertNotIn("CLAUDE CODE VERSION", context)
+        self.assertFalse(calls.exists(), "the Codex variant ran claude or curl")
+
     def test_codex_protocol_is_injected_verbatim(self):
         context = parse_context(self, self.run_start(), "SessionStart")
         self.assertTrue(context.startswith("<evisions_safety>"))
@@ -539,10 +555,16 @@ class CodexSafetyStartTest(unittest.TestCase):
         self.assertLess(len(context), CODEX_CONTEXT_BUDGET)
 
     def test_claude_variant_is_unchanged_without_the_argument(self):
+        # No network in a unit test: the Claude variant's version check makes no request with this set.
         result = subprocess.run(
             [BASH, str(HOOKS_DIR / "safety-start")],
             input="{}",
-            env=dict(hermetic_env(self.home), CLAUDE_CONFIG_DIR=str(self.tmp / "config")),
+            env=dict(
+                hermetic_env(self.home),
+                CLAUDE_CONFIG_DIR=str(self.tmp / "config"),
+                CLAUDE_PLUGIN_DATA=str(self.tmp / "data"),
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+            ),
             capture_output=True,
             text=True,
             timeout=30,
