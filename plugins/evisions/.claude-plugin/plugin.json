@@ -1,6 +1,6 @@
 {
   "name": "evisions",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Working discipline for eVisions: session checkpoints and closing, WORKSTATE and worklog journals, feature docs, decision log and ADRs, a prompt engineer with a sanity check, research agents and Socratic brainstorming, a PRD interview, code-review and security-audit agents, bug and tech-debt logs and a static scanner for third-party skills, plus a safety baseline: hooks that block destructive commands and secret reads, and an installer for the matching permission settings. Optional public companion plugins are installed separately from their authors.",
   "author": {
     "name": "Hradni.AI"

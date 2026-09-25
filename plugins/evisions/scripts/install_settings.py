@@ -64,6 +64,9 @@ PROGRAM = "evisions-settings"
 RECORD_DIR = "evisions"
 RECORD_FILE = "settings-applied.json"
 STATUSLINE_FILE = "statusline.py"
+# The status line script keeps its per-session metrics cache in this folder next to it. The installer
+# never writes into it; it deletes it together with the script.
+STATUSLINE_CACHE = "statusline-cache"
 BACKUP_INFIX = ".bak-evisions-"
 
 STANDARD = "standard"
@@ -266,9 +269,11 @@ def quote_for_sh(path: str) -> str:
 def statusline_command(script: Path) -> str:
     # Forward slashes: on Windows the command runs in Git Bash, where backslashes are escapes. The
     # chain covers macOS and Linux (python3), most Windows installs (python) and Windows with only the
-    # py launcher (py -3); a missing or broken interpreter fails over to the next one.
+    # py launcher (py -3); a missing or broken interpreter fails over to the next one. -S skips the
+    # site-packages setup, which the standard-library-only script never needs and which is a sizeable
+    # share of every render (measured). An earlier install's command is updated by the next --apply.
     quoted = quote_for_sh(script.as_posix())
-    return f"python3 {quoted} 2>/dev/null || python {quoted} 2>/dev/null || py -3 {quoted}"
+    return f"python3 -S {quoted} 2>/dev/null || python -S {quoted} 2>/dev/null || py -3 -S {quoted}"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -935,8 +940,19 @@ def statusline_referenced(data: dict, script: Path) -> bool:
     return isinstance(command, str) and script.as_posix() in command
 
 
+def remove_statusline_cache(folder: Path) -> None:
+    """Delete the status line's metrics cache: the files the script wrote there, then the folder."""
+    if folder.is_symlink() or not folder.is_dir():
+        return
+    for entry in folder.iterdir():
+        if entry.is_file() and not entry.is_symlink():
+            entry.unlink()
+    if not any(folder.iterdir()):
+        folder.rmdir()
+
+
 def plan_files(plan: Plan, record: Optional[dict], config_dir: Path, copied_script: Path) -> tuple:
-    """(file actions, recorded files). Actions are ("copy" | "refresh" | "delete", path)."""
+    """(file actions, recorded files). Actions are ("copy" | "refresh" | "delete" | "delete-cache", path)."""
     actions = []
     files = []
     relative_script = copied_script.relative_to(config_dir).as_posix()
@@ -956,6 +972,9 @@ def plan_files(plan: Plan, record: Optional[dict], config_dir: Path, copied_scri
             files.append(relative)
         else:
             actions.append(("delete", target))
+    cache = copied_script.parent / STATUSLINE_CACHE
+    if ("delete", copied_script) in actions and cache.is_dir():
+        actions.append(("delete-cache", cache))
     return actions, files
 
 
@@ -1103,6 +1122,8 @@ def file_lines(actions: list, done: bool) -> list:
             lines.append(f"{'Copied' if done else 'Will copy'} the status line script to {path}")
         elif action == "delete":
             lines.append(f"{'Deleted' if done else 'Will delete'} {path} (installed by an earlier install, no longer used)")
+        elif action == "delete-cache":
+            lines.append(f"{'Deleted' if done else 'Will delete'} the status line's cache {path}")
     return lines
 
 
@@ -1246,6 +1267,8 @@ def run_install(args: argparse.Namespace, dry_run: bool) -> int:
         for action, path in actions:
             if action == "delete":
                 path.unlink()
+            elif action == "delete-cache":
+                remove_statusline_cache(path)
         write_atomic(context.record_path, dump_json(new_record))
     except OSError as error:
         raise InstallerError(
@@ -1286,6 +1309,8 @@ def run_remove(args: argparse.Namespace) -> int:
             kept_files.append(target)
         else:
             deletions.append(target)
+    cache = context.record_dir / STATUSLINE_CACHE
+    delete_cache = cache.is_dir() and not statusline_referenced(plan.data, context.copied_script)
 
     lines = ["evisions settings installer: removing what earlier installs added", ""]
     lines.append(f"Settings file: {context.settings_path}")
@@ -1300,6 +1325,8 @@ def run_remove(args: argparse.Namespace) -> int:
             lines.append(f"Left alone: {key}, because you changed it after the install.")
     for target in deletions:
         lines.append(f"Deleted {target}")
+    if delete_cache:
+        lines.append(f"Deleted the status line's cache {cache}")
     for target in kept_files:
         lines.append(f"Kept {target}, because your status line still runs it.")
     if delete_settings:
@@ -1318,6 +1345,8 @@ def run_remove(args: argparse.Namespace) -> int:
             write_atomic(context.settings_path, dump_json(plan.data))
         for target in deletions:
             target.unlink()
+        if delete_cache:
+            remove_statusline_cache(cache)
         context.record_path.unlink()
         if context.record_dir.is_dir() and not any(context.record_dir.iterdir()):
             context.record_dir.rmdir()

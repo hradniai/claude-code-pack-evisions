@@ -1,6 +1,6 @@
 {
   "name": "evisions",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Safety baseline for Codex CLI: hooks that block recursive deletion, destructive git in every form, secret reads, downloaded code run in a shell, edits of env files, credentials, shell startup files and Codex's own configuration, and nested codex runs that switch the safety layer off, plus a session protocol for handling a block. The Claude Code kit's skills and agents are not part of the Codex package.",
   "author": {
     "name": "Hradni.AI"
