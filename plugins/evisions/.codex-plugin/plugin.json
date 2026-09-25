@@ -1,0 +1,26 @@
+{
+  "name": "evisions",
+  "version": "1.2.0",
+  "description": "Safety baseline for Codex CLI: hooks that block recursive deletion, destructive git in every form, secret reads, downloaded code run in a shell, edits of env files, credentials, shell startup files and Codex's own configuration, and nested codex runs that switch the safety layer off, plus a session protocol for handling a block. The Claude Code kit's skills and agents are not part of the Codex package.",
+  "author": {
+    "name": "Hradni.AI"
+  },
+  "keywords": [
+    "safety",
+    "security",
+    "hooks"
+  ],
+  "skills": "./context/",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "eVisions safety",
+    "shortDescription": "Blocks destructive commands, secret reads and edits of Codex's own configuration",
+    "longDescription": "A PreToolUse check on every shell command and every apply_patch edit blocks recursive deletion, destructive git (force push, reset --hard, checkout --, clean -f, branch -D, commit --no-verify, -n and -a, also behind git -C), reads of env files and credentials, downloaded code piped into a shell, edits of env files, credentials, shell startup files and the Codex configuration, rules, hooks and plugins, and nested codex runs with bypass flags. A SessionStart hook tells the agent how to handle a block. The hooks run only after the user trusts them in Codex.",
+    "developerName": "Hradni.AI",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "What does the evisions safety check block?"
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "claude-code-pack-evisions",
+  "interface": {
+    "displayName": "eVisions"
+  },
+  "plugins": [
+    {
+      "name": "evisions",
+      "source": {
+        "source": "local",
+        "path": "./plugins/evisions"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

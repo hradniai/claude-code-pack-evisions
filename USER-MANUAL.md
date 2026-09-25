@@ -212,3 +212,11 @@ claude plugin update evisions@claude-code-pack-evisions
 ```
 
 Then restart Claude Code, ask Claude to run `evisions-settings --apply` so your settings follow the new version, and restart once more. If you skipped the settings step, you can skip this too, or do it now.
+
+## Using it with Codex
+
+If you work in OpenAI's Codex CLI (the command line app that comes with a ChatGPT subscription), the kit's safety check works there too. Codex gets only the safety part: `/checkpoint`, `/end` and the other helpers described above are for Claude Code only for now.
+
+To install it, download the repository as described above, open Codex in that folder and write "Install it following CODEX.md." Codex shows you each command before running it and waits for your yes. One step only you can do: after the install, quit Codex, start it again, and on the screen "Hooks need review" choose "Trust all and continue". Hooks are the small programs the kit runs before every command. Until you trust them, Codex does not run them, and the safety check is off. After an update Codex may show the screen again; trust them again.
+
+In Codex the check stops the same kinds of action as described in the safety section above, and also git commands that throw away work or overwrite shared history, and attempts to switch the check off. It keeps working when Codex is started in its mode that does everything without asking (`--yolo`). The message again starts with `evisions safety:`. If Codex tells you at the start of a conversation that the evisions safety hooks are not active, the trust step is missing: type `/hooks` in Codex and trust them. The details, including what the check does not cover, are in [`CODEX.md`](CODEX.md).

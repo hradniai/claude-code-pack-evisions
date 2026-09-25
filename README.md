@@ -8,6 +8,8 @@ installer for the matching Claude Code settings), a PRD interview, code and secu
 log for bugs and tech debt found along the way, and an admission check for third-party skills.
 
 The user manual for the team, written for non-developers, is [`USER-MANUAL.md`](USER-MANUAL.md).
+Since 1.2.0 the same repository also installs the safety baseline into OpenAI's Codex CLI; see
+[Using it with Codex](#using-it-with-codex).
 
 ## What the plugin gives
 
@@ -87,6 +89,33 @@ claude plugin marketplace remove claude-code-pack-evisions
 The first line undoes the settings baseline and must run while the plugin is still there, because the
 installer ships with it; when the baseline was never applied, it reports that there is nothing to undo.
 Restart Claude Code afterwards.
+
+## Using it with Codex
+
+The same marketplace and the same `evisions` plugin install into OpenAI's Codex CLI, with the safety
+part only: the skills and agents above are Claude Code only in this release. The install, the required
+hook trust step, the check, the update and the removal are in [`CODEX.md`](CODEX.md); Codex can follow
+it itself when opened in a clone of this repository and told "install it following CODEX.md". In short:
+
+```bash
+codex plugin marketplace add hradniai/claude-code-pack-evisions
+codex plugin add evisions@claude-code-pack-evisions
+```
+
+then the settings installer `evisions-codex-settings` from the plugin folder, a Codex restart with
+"Trust all and continue" on the "Hooks need review" screen (without it no hook runs), and
+`evisions-codex-settings --check`, which must exit 0. Codex stores the short marketplace form as an
+HTTPS address, so no SSH key is needed there.
+
+| Codex-side file | What it does |
+|---|---|
+| `.agents/plugins/marketplace.json` | The marketplace entry Codex reads (Claude Code reads `.claude-plugin/marketplace.json`). |
+| `plugins/evisions/.codex-plugin/plugin.json` | The Codex manifest: loads only `hooks/codex-hooks.json`, no skills or agents. |
+| `plugins/evisions/hooks/codex-hooks.json` | Three hooks: the safety check before every shell command and `apply_patch` edit, the safety protocol at session start, the local time on every message. |
+| `plugins/evisions/hooks/bash_safety.py --runtime codex` | The same safety check in Codex mode: adds destructive git in every form (`git -C` included), `apply_patch` edits of env, credential, shell startup and Codex control files, and attempts to switch the safety off. |
+| `plugins/evisions/context/safety-codex.md` | The safety protocol text for Codex. |
+| `plugins/evisions/hooks/run-python.ps1`, `hooks/codex_context.py` | The fail-closed Windows launcher and the Windows variant of the context hooks (untested on Windows). |
+| `plugins/evisions/bin/evisions-codex-settings` | Settings installer for the Codex home: 21 forbidden command rules (`settings/codex-baseline.rules`), environment filters that keep secret-looking variables away from commands, a marked safety block in the global `AGENTS.md`, and an optional deny-read profile. Dry run by default; `--apply`, `--check`, `--remove`, `--restore-declined`, `--deny-read`, `--profile`. |
 
 ## Safety baseline
 
@@ -271,8 +300,8 @@ claude plugin validate plugins/evisions
 
 The unit tests cover the hooks, the settings installer, the helpers and the skill scanner as well as
 the plugin contract. Every release
-raises `version` in both `.claude-plugin/marketplace.json` and
-`plugins/evisions/.claude-plugin/plugin.json`; the contract test fails when they disagree.
+raises `version` in `.claude-plugin/marketplace.json`, `plugins/evisions/.claude-plugin/plugin.json`
+and `plugins/evisions/.codex-plugin/plugin.json`; the contract test fails when they disagree.
 
 Left out of the general starter pack's kernel on purpose: a large-file read guard (it blocked
 screenshots, and Claude Code's Read tool now truncates large files itself), four pipe deny rules that

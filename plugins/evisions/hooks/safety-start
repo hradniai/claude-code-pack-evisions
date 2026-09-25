@@ -7,6 +7,11 @@
 #   of the conversation, not after the first unexplained block.
 # - SETTINGS BASELINE when the optional settings baseline (evisions-settings) was never applied, so
 #   Claude can point to it when the user asks about safety or setup.
+# With the argument `codex` (hooks/codex-hooks.json) it emits the Codex variant instead: the protocol
+# from context/safety-codex.md, the absolute paths of the plugin's tools (Codex does not put the
+# plugin's bin/ folder on PATH, and the safety check allows list-env-keys by exactly that path), and a
+# SETTINGS BASELINE line when the Codex baseline (evisions-codex-settings) was never applied. On
+# Windows, codex-hooks.json runs hooks/codex_context.py instead, which prints the same JSON.
 # Plain bash only (no jq, no python) so it runs unchanged on Linux, macOS (bash 3.2) and Git Bash on
 # Windows. It always exits 0 because a failing hook must never block a session: a missing context file
 # becomes a one-line notice instead of an error. Claude Code caps additionalContext at 10,000
@@ -67,23 +72,43 @@ if [ ! -t 0 ]; then
     cat >/dev/null 2>&1
 fi
 
+runtime="${1:-claude}"
+
 status=""
 if ! find_python; then
-    status="${status}
+    if [ "$runtime" = "codex" ]; then
+        status="${status}
+SAFETY STATUS: Python 3.9+ was not found. The plugin's safety check blocks every shell command and file edit until it is installed. Tell the user at the start of the conversation."
+    else
+        status="${status}
 SAFETY STATUS: Python 3.9+ was not found. The plugin's safety check blocks Bash and file reads until it is installed. Tell the user at the start of the conversation."
+    fi
 fi
 
-config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
-if [ ! -f "${config_dir}/evisions/settings-applied.json" ]; then
-    status="${status}
+tools=""
+if [ "$runtime" = "codex" ]; then
+    settings_tool="${PLUGIN_ROOT}/bin/evisions-codex-settings"
+    tools="TOOL PATHS: Codex does not put the plugin's bin/ folder on PATH, so run these tools by their absolute path, quoted as shown:
+- list-env-keys: \"${PLUGIN_ROOT}/bin/list-env-keys\"
+- evisions-codex-settings: \"${settings_tool}\""
+    codex_home="${CODEX_HOME:-${HOME:-}/.codex}"
+    if [ ! -f "${codex_home}/evisions/codex-settings-applied.json" ]; then
+        status="${status}
+SETTINGS BASELINE: not installed. The user can preview it with \`\"${settings_tool}\"\` and install it with \`\"${settings_tool}\" --apply\`. Mention this only if the user asks about safety, permissions or setup."
+    fi
+    protocol="$(read_context context/safety-codex.md)"
+else
+    config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
+    if [ ! -f "${config_dir}/evisions/settings-applied.json" ]; then
+        status="${status}
 SETTINGS BASELINE: not installed. The user can preview it with \`evisions-settings\` and install it with \`evisions-settings --apply\`. Mention this only if the user asks about safety, permissions or setup."
+    fi
+    protocol="$(read_context context/safety.md)"
 fi
-
-protocol="$(read_context context/safety.md)"
 
 context="<evisions_safety>
 ${protocol}
-${status}
+${tools}${status}
 </evisions_safety>"
 
 # printf rather than a heredoc, which has been reported to hang hooks under bash 5.3.

@@ -120,6 +120,20 @@ BASH_BLOCK = {
     "ssh folder without slash": "grep -r . ~/.ssh",
     "gh folder without slash": "grep -ri token ~/.config/gh",
     "loop over ssh keys": "for f in ~/.ssh/*; do cat \"$f\"; done",
+    # review round: recursive deletion in inline interpreter code
+    "python rmtree via __import__": "python3 -c '__import__(\"shutil\").rmtree(\"build\")'",
+    "python shutil.rmtree": "python3 -c \"import shutil; shutil.rmtree('build')\"",
+    "node rmSync recursive": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\"",
+    "node rmdirSync recursive": "node -e \"fs.rmdirSync('d',{recursive:true})\"",
+    "python heredoc rmtree": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('build')\nEOF",
+    "node heredoc rmSync": "node <<'EOF'\nrequire('fs').rmSync('build', {recursive: true})\nEOF",
+    "ruby FileUtils.rm_rf": "ruby -e \"require 'fileutils'; FileUtils.rm_rf('build')\"",
+    # review round: shell aliases defined on the git command line
+    "git alias to a forced push": "git -c alias.x='!push --force origin main' x",
+    "git alias to a hard reset": "git -c alias.y='!git reset --hard' y",
+    "git alias to rm": "git -c alias.z='!rm -rf build' z",
+    "git alias behind -C": "git -C . -c alias.x='!echo hi' x",
+    "git alias from a hidden variable": "git --config-env alias.x=MY_ALIAS x",
 }
 
 POWERSHELL_BLOCK = {
@@ -210,6 +224,12 @@ BASH_ALLOW = {
     "grep in source": "grep -rn TODO src",
     "build and list": "npm run build && ls dist",
     "dd on a file": "dd if=/dev/zero of=./blank.img bs=1M count=1",
+    # review round: single-file removal in inline code, plain git config and aliases
+    "node single-file rmSync": "node -e \"require('fs').rmSync('x.txt')\"",
+    "python pathlib unlink": "python3 -c \"import pathlib; pathlib.Path('x.txt').unlink()\"",
+    "search for rmtree": "grep -rn rmtree src",
+    "git config override": "git -c core.pager=less log --oneline",
+    "git alias without a shell command": "git -c alias.st=status st",
 }
 
 POWERSHELL_ALLOW = {

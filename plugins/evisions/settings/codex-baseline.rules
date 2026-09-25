@@ -1,0 +1,205 @@
+# evisions safety baseline: Codex command rules (execpolicy, Starlark syntax).
+#
+# bin/evisions-codex-settings --apply copies this file to <codex-home>/rules/evisions.rules, and
+# --remove deletes that copy again. Codex loads every *.rules file in that folder at startup, so
+# restart Codex after a change. Edit this source file, never the copy: the next --apply refreshes it.
+#
+# What is here: only decision = "forbidden" rules, for the destructive commands of the evisions
+# Claude Code deny list (settings/baseline.json) that an argument prefix can express. Codex rejects a
+# forbidden command without asking, in every approval mode, --yolo included.
+#
+# What is deliberately not here: "prompt" rules. Under --yolo (approval_policy = "never") Codex turns
+# a prompt rule into a hard rejection instead of a question, so prompt rules for the Claude ask list
+# (git push, git merge, installs, scp, rsync, docker rm) would block everyday commands for everyone
+# who runs --yolo. The evisions safety hook and the safety protocol cover that tier instead.
+#
+# Limits, measured on Codex 0.154: a rule matches the command's argument list from its first word,
+# with no wildcards. `git -C <dir> push --force`, `git -c key=value ...`, `/usr/bin/git ...`, a flag
+# after other arguments (`git push origin main --force`) and a shell script that uses redirection,
+# $(...), variables or globs therefore match nothing here; the evisions safety hook covers those.
+# PowerShell commands on Windows are not covered either. `codex exec --ignore-rules` skips this file.
+#
+# Every rule carries match and not_match examples. Codex checks them when it loads the file and
+# rejects the file when one fails, so `codex execpolicy check --rules <this file> -- true` is a
+# self-test (tests/test_install_codex_settings.py runs it). Keep it passing: when one *.rules file
+# fails to load, Codex ignores every user rules file, the user's own default.rules included.
+
+# --- Files and folders -------------------------------------------------------------------------
+
+prefix_rule(
+    pattern = ["rm", ["-r", "-R", "-rf", "-rR", "-fr", "-fR", "-Rf", "--recursive"]],
+    decision = "forbidden",
+    justification = "evisions safety: deleting a folder with everything in it cannot be undone. Give the user the exact command to run themselves.",
+    match = ["rm -rf build", "rm -r old-folder", "rm -fR cache", "rm --recursive tmp"],
+    not_match = ["rm notes.txt", "rmdir empty-folder", "rm -i notes.txt"],
+)
+
+prefix_rule(
+    pattern = ["rm", ["-f", "--force"], ["-r", "-R", "--recursive"]],
+    decision = "forbidden",
+    justification = "evisions safety: deleting a folder with everything in it cannot be undone. Give the user the exact command to run themselves.",
+    match = ["rm -f -r build", "rm --force --recursive tmp"],
+    not_match = ["rm -f notes.txt"],
+)
+
+prefix_rule(
+    pattern = ["mv", ["-f", "--force", "-fv", "-vf"]],
+    decision = "forbidden",
+    justification = "evisions safety: a forced move silently overwrites the target file. Move without -f, or give the user the exact command.",
+    match = ["mv -f a.txt b.txt", "mv --force a.txt b.txt"],
+    not_match = ["mv a.txt b.txt", "mv -n a.txt b.txt"],
+)
+
+# --- Administrator rights and ownership ---------------------------------------------------------
+
+prefix_rule(
+    pattern = [["sudo", "su"]],
+    decision = "forbidden",
+    justification = "evisions safety: commands with administrator rights are for the user to run. Give the user the exact command.",
+    match = ["sudo apt-get update", "su", "su - admin"],
+    not_match = ["sudoku", "sum file.txt"],
+)
+
+prefix_rule(
+    pattern = ["chown"],
+    decision = "forbidden",
+    justification = "evisions safety: changing file ownership can lock the user out of their files. Give the user the exact command.",
+    match = ["chown user file.txt", "chown -R user folder"],
+    not_match = ["chmod 644 file.txt"],
+)
+
+prefix_rule(
+    pattern = ["chmod", ["-R", "--recursive", "777", "0777", "666", "0666", "+s", "u+s", "g+s"]],
+    decision = "forbidden",
+    justification = "evisions safety: recursive, world-writable or setuid permission changes weaken the whole system. Change one file with a narrow mode instead.",
+    match = ["chmod -R 755 folder", "chmod 777 file.txt", "chmod 666 file.txt", "chmod +s program", "chmod u+s program"],
+    not_match = ["chmod 644 file.txt", "chmod +x script.sh", "chmod u+x script.sh"],
+)
+
+# --- Disks and the machine ----------------------------------------------------------------------
+
+prefix_rule(
+    pattern = [["mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat", "mkfs.fat", "mkfs.exfat", "mkfs.ntfs", "mkfs.msdos"]],
+    decision = "forbidden",
+    justification = "evisions safety: formatting a disk destroys everything on it.",
+    match = ["mkfs /dev/sdb1", "mkfs.ext4 /dev/sdb1"],
+    not_match = ["mkdir folder"],
+)
+
+prefix_rule(
+    pattern = ["dd"],
+    decision = "forbidden",
+    justification = "evisions safety: dd writes raw bytes and can overwrite a whole disk. Use cp for files, or give the user the exact command.",
+    match = ["dd if=image.iso of=/dev/sdb", "dd of=/dev/sdb"],
+    not_match = ["ddate"],
+)
+
+prefix_rule(
+    pattern = [["shutdown", "reboot", "halt"]],
+    decision = "forbidden",
+    justification = "evisions safety: shutting down or restarting the machine is for the user to do.",
+    match = ["shutdown -h now", "reboot", "halt"],
+    not_match = ["uptime"],
+)
+
+prefix_rule(
+    pattern = ["pkill"],
+    decision = "forbidden",
+    justification = "evisions safety: pkill stops every process whose name matches, often more than intended. Stop one known process, or give the user the exact command.",
+    match = ["pkill node", "pkill -f server"],
+    not_match = ["pgrep node"],
+)
+
+prefix_rule(
+    pattern = ["launchctl"],
+    decision = "forbidden",
+    justification = "evisions safety: launchctl changes what the Mac starts and runs in the background. Give the user the exact command.",
+    match = ["launchctl load job.plist", "launchctl list"],
+    not_match = ["launchd"],
+)
+
+# --- Shell tricks -------------------------------------------------------------------------------
+
+prefix_rule(
+    pattern = ["eval"],
+    decision = "forbidden",
+    justification = "evisions safety: eval runs text as a new command, which hides what really runs. Run the command directly.",
+    match = ["eval echo hello"],
+    not_match = ["echo eval"],
+)
+
+prefix_rule(
+    pattern = ["export"],
+    decision = "forbidden",
+    justification = "evisions safety: export changes the environment of every later command in the shell. Set the variable for one command instead (NAME=value command).",
+    match = ["export PATH=/opt/bin", "export DEBUG=1"],
+    not_match = ["echo export"],
+)
+
+# --- Packages -----------------------------------------------------------------------------------
+
+prefix_rule(
+    pattern = ["npm", "publish"],
+    decision = "forbidden",
+    justification = "evisions safety: publishing a package makes it public and cannot be undone. The user publishes.",
+    match = ["npm publish", "npm publish --access public"],
+    not_match = ["npm pack", "npm run publish-docs"],
+)
+
+prefix_rule(
+    pattern = ["npm", ["install", "i"], ["-g", "--global"]],
+    decision = "forbidden",
+    justification = "evisions safety: a global install changes tools for the whole machine. Install into the project, or give the user the exact command.",
+    match = ["npm install -g typescript", "npm i --global typescript"],
+    not_match = ["npm install typescript", "npm i"],
+)
+
+# --- git ----------------------------------------------------------------------------------------
+
+prefix_rule(
+    pattern = ["git", "push", ["--force", "-f", "--force-with-lease", "--force-if-includes"]],
+    decision = "forbidden",
+    justification = "evisions safety: a force push can erase other people's commits on the server. Give the user the exact command.",
+    match = ["git push --force origin main", "git push -f", "git push --force-with-lease origin feature"],
+    not_match = ["git push origin feature", "git push"],
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "evisions safety: git reset --hard throws away uncommitted work for good. Use git stash, or give the user the exact command.",
+    match = ["git reset --hard", "git reset --hard HEAD~1"],
+    not_match = ["git reset", "git reset --soft HEAD~1"],
+)
+
+prefix_rule(
+    pattern = ["git", "checkout", "--"],
+    decision = "forbidden",
+    justification = "evisions safety: git checkout -- throws away uncommitted changes to those files. Use git stash, or give the user the exact command.",
+    match = ["git checkout -- file.txt", "git checkout -- ."],
+    not_match = ["git checkout main", "git checkout -b feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean", ["-f", "-ff", "-fd", "-fx", "-fX", "-fdx", "-fxd", "-d", "-df", "-dx", "-dfx", "-dxf", "--force"]],
+    decision = "forbidden",
+    justification = "evisions safety: git clean deletes untracked files for good. Show the list with git clean -n, then give the user the exact command.",
+    match = ["git clean -f", "git clean -fd", "git clean -fdx", "git clean -d -f"],
+    not_match = ["git clean -n", "git clean --dry-run"],
+)
+
+prefix_rule(
+    pattern = ["git", "branch", "-D"],
+    decision = "forbidden",
+    justification = "evisions safety: git branch -D deletes a branch even when its work is not merged. Use git branch -d, or give the user the exact command.",
+    match = ["git branch -D feature"],
+    not_match = ["git branch -d feature", "git branch"],
+)
+
+prefix_rule(
+    pattern = ["git", "commit", ["--no-verify", "-n", "-a", "-am", "--all"]],
+    decision = "forbidden",
+    justification = "evisions safety: skipping the commit checks or committing every changed file at once hides what goes in. Stage the files by name with git add, then git commit.",
+    match = ["git commit --no-verify -m wip", "git commit -n -m wip", "git commit -a", "git commit -am wip", "git commit --all"],
+    not_match = ["git commit -m message", "git commit --amend"],
+)
