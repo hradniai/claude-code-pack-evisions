@@ -6,6 +6,7 @@ malformed file is reported as its own failure (one subtest each), never as a cra
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -18,7 +19,13 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parents[1]
 MARKETPLACE_MANIFEST = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGIN_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+# The Codex side: a repo marketplace Codex prefers over the Claude one, and an overlay manifest in the
+# same plugin folder that points Codex at its own hook file (Claude Code reads only .claude-plugin/).
+CODEX_MARKETPLACE_MANIFEST = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
+CODEX_PLUGIN_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+CODEX_HOOKS = "./hooks/codex-hooks.json"
 THIS_FILE = Path(__file__).resolve()
+SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
 MARKETPLACE_NAME = "claude-code-pack-evisions"
 PLUGIN_NAME = "evisions"
@@ -53,6 +60,7 @@ EXECUTABLES = (
     "hooks/run-python",
     "bin/list-env-keys",
     "bin/evisions-settings",
+    "bin/evisions-codex-settings",
 )
 REQUIRED_FILES = (
     *(f"skills/{skill}/SKILL.md" for skill in SKILLS),
@@ -70,11 +78,18 @@ REQUIRED_FILES = (
     "hooks/bash_safety.py",
     "scripts/env_key_classify.py",
     "scripts/install_settings.py",
+    "scripts/install_codex_settings.py",
+    "settings/codex-baseline.rules",
     "scripts/statusline.py",
     "settings/baseline.json",
     "context/documentation-standard.md",
     "context/kit-map.md",
     "context/safety.md",
+    ".codex-plugin/plugin.json",
+    "hooks/codex-hooks.json",
+    "hooks/run-python.ps1",
+    "hooks/codex_context.py",
+    "context/safety-codex.md",
 )
 # Every hook the plugin must register: (event, matcher that must be covered or None, script name).
 REQUIRED_HOOKS = (
@@ -84,6 +99,15 @@ REQUIRED_HOOKS = (
     ("UserPromptSubmit", None, "current-time"),
     ("PreToolUse", ("Bash", "PowerShell", "Read", "Grep"), "bash_safety.py"),
 )
+# Every hook the Codex side must register in hooks/codex-hooks.json: (event, text of the command).
+CODEX_REQUIRED_HOOKS = (
+    ("SessionStart", 'hooks/safety-start" codex'),
+    ("UserPromptSubmit", 'hooks/current-time"'),
+    ("PreToolUse", 'hooks/run-python" hooks/bash_safety.py --runtime codex'),
+)
+CODEX_PRE_TOOL_USE_MATCHER = "^(Bash|apply_patch)$"
+# The fail-closed Windows launcher every Codex handler runs on Windows.
+CODEX_WINDOWS_LAUNCHER = 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\\hooks\\run-python.ps1" '
 
 # Skills carry name and description (plus disable-model-invocation where needed), agents carry name,
 # description, tools and model. Plugin agents ignore hooks, mcpServers and permissionMode, and a
@@ -114,7 +138,32 @@ LEAK_ALLOWLIST = {
     "README.md": (REPO_SLUG,),
     "INSTRUCTIONS.md": (REPO_SLUG,),
     "USER-MANUAL.md": (REPO_SLUG,),
+    "CODEX.md": (REPO_SLUG,),
 }
+# The product name Codex is allowed in the files of the Codex side and in the repository documents,
+# nowhere else in the plugin: the Claude side must not send Claude after a tool it does not run. The
+# word is taken out of these files before every leak pattern runs, private ones included.
+CODEX_WORD = re.compile(r"\bcodex\b", re.IGNORECASE)
+CODEX_FILES = (
+    ".agents/plugins/marketplace.json",
+    "plugins/evisions/.codex-plugin/plugin.json",
+    "plugins/evisions/hooks/codex-hooks.json",
+    "plugins/evisions/hooks/run-python.ps1",
+    "plugins/evisions/hooks/codex_context.py",
+    "plugins/evisions/hooks/bash_safety.py",
+    "plugins/evisions/hooks/safety-start",
+    "plugins/evisions/context/safety-codex.md",
+    "plugins/evisions/bin/evisions-codex-settings",
+    "plugins/evisions/scripts/install_codex_settings.py",
+    "plugins/evisions/settings/codex-*",
+    "plugins/evisions/tests/test_codex_safety.py",
+    "plugins/evisions/tests/test_install_codex_settings.py",
+    "plugins/evisions/tests/test_plugin_contract.py",
+    "README.md",
+    "INSTRUCTIONS.md",
+    "USER-MANUAL.md",
+    "CODEX.md",
+)
 # Optional companion plugins may be named only where the kit routes to them or tells the user how to
 # install them; anywhere else a mention makes Claude reach for a plugin that may be absent.
 COMPANION_NAMES = re.compile(r"superpowers|\breplan\b|mattpocock", re.IGNORECASE)
@@ -125,10 +174,12 @@ COMPANION_FILES = {
     "INSTRUCTIONS.md",
     "USER-MANUAL.md",
 }
-# The two manifests may name "Hradni.AI" as marketplace owner and plugin author, nowhere else.
+# The manifests may name "Hradni.AI" as marketplace owner, plugin author and Codex developer name,
+# nowhere else. Each entry is a path of keys to the one string that may hold it.
 MANIFEST_AUTHOR_FIELDS = {
-    ".claude-plugin/marketplace.json": "owner",
-    "plugins/evisions/.claude-plugin/plugin.json": "author",
+    ".claude-plugin/marketplace.json": (("owner", "name"),),
+    "plugins/evisions/.claude-plugin/plugin.json": (("author", "name"),),
+    "plugins/evisions/.codex-plugin/plugin.json": (("author", "name"), ("interface", "developerName")),
 }
 MANIFEST_AUTHOR = "Hradni.AI"
 
@@ -138,9 +189,12 @@ COMPANY_NAME_FILES = {
     "README.md",
     "INSTRUCTIONS.md",
     "USER-MANUAL.md",
+    "CODEX.md",
     "LICENSE",
     ".claude-plugin/marketplace.json",
     "plugins/evisions/.claude-plugin/plugin.json",
+    ".agents/plugins/marketplace.json",
+    "plugins/evisions/.codex-plugin/plugin.json",
 }
 
 FORBIDDEN_DASHES = {"\u2014": "U+2014 em dash", "\u2015": "U+2015 horizontal bar"}
@@ -150,6 +204,10 @@ BLOCK_SCALAR = {">", "|", ">-", "|-", ">+", "|+"}
 
 def relative(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
+
+
+def codex_allowed(name: str) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in CODEX_FILES)
 
 
 def repo_files() -> list[Path]:
@@ -262,15 +320,79 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(data.get("name"), PLUGIN_NAME)
 
     def test_versions_agree(self) -> None:
-        marketplace, error = load_json(MARKETPLACE_MANIFEST)
+        # All four manifests name one release. The Codex marketplace entry needs no version (measured on
+        # Codex 0.154: it installs the version of .codex-plugin/plugin.json and ignores one in the entry),
+        # but one it carries must agree.
+        versions = {}
+        for label, path in (
+            ("Claude marketplace entry", MARKETPLACE_MANIFEST),
+            ("Claude plugin.json", PLUGIN_MANIFEST),
+            ("Codex plugin.json", CODEX_PLUGIN_MANIFEST),
+            ("Codex marketplace entry", CODEX_MARKETPLACE_MANIFEST),
+        ):
+            data, error = load_json(path)
+            if error:
+                self.fail(error)
+            if "marketplace" in label:
+                data = next((item for item in data.get("plugins", []) if item.get("name") == PLUGIN_NAME), {})
+                if label.startswith("Codex") and "version" not in data:
+                    continue
+            versions[label] = data.get("version")
+        for label, version in versions.items():
+            with self.subTest(manifest=label):
+                self.assertIsInstance(version, str, f"{label} carries no version")
+                self.assertRegex(version, SEMVER)
+        self.assertEqual(len(set(versions.values())), 1, f"manifests disagree on the version: {versions}")
+
+    def test_codex_marketplace_source_resolves_to_plugin_root(self) -> None:
+        data, error = load_json(CODEX_MARKETPLACE_MANIFEST)
         if error:
             self.fail(error)
-        plugin, error = load_json(PLUGIN_MANIFEST)
+        # The same marketplace name as the Claude side, so `evisions@claude-code-pack-evisions` installs
+        # the plugin in both runtimes.
+        self.assertEqual(data.get("name"), MARKETPLACE_NAME)
+        entries = [entry for entry in data.get("plugins", []) if entry.get("name") == PLUGIN_NAME]
+        self.assertEqual(len(entries), 1, f"the Codex marketplace must list exactly one plugin named {PLUGIN_NAME!r}")
+        entry = entries[0]
+        source = entry.get("source", {})
+        self.assertEqual(source.get("source"), "local")
+        path = source.get("path")
+        self.assertIsInstance(path, str)
+        self.assertTrue(path.startswith("./"), "a relative plugin source must start with ./")
+        self.assertEqual((REPO_ROOT / path).resolve(), PLUGIN_ROOT.resolve())
+        self.assertIn(entry.get("policy", {}).get("installation"), {"AVAILABLE", "INSTALLED_BY_DEFAULT", "NOT_AVAILABLE"})
+        self.assertIn(entry.get("policy", {}).get("authentication"), {"ON_INSTALL", "ON_USE"})
+        self.assertTrue(entry.get("category"), "a Codex marketplace entry needs a category")
+
+    def test_codex_manifest(self) -> None:
+        data, error = load_json(CODEX_PLUGIN_MANIFEST)
         if error:
             self.fail(error)
-        entry = next((item for item in marketplace.get("plugins", []) if item.get("name") == PLUGIN_NAME), {})
-        self.assertTrue(plugin.get("version"), "plugin.json carries no version")
-        self.assertEqual(entry.get("version"), plugin.get("version"), "marketplace entry and plugin.json disagree on version")
+        self.assertEqual(data.get("name"), PLUGIN_NAME)
+        self.assertTrue(data.get("description"))
+        self.assertTrue(data.get("author", {}).get("name"))
+        # Codex loads only the hook file the manifest names (measured: the Claude hooks/hooks.json is not
+        # loaded next to it), so the Claude handlers never run under Codex.
+        self.assertEqual(data.get("hooks"), CODEX_HOOKS)
+        self.assertTrue((PLUGIN_ROOT / CODEX_HOOKS).is_file())
+        for field in ("displayName", "shortDescription", "longDescription", "developerName", "category"):
+            with self.subTest(field=field):
+                self.assertTrue(data.get("interface", {}).get(field), f"interface.{field} is empty")
+
+    def test_codex_manifest_skills_path_holds_no_skills(self) -> None:
+        # The Codex package is the safety layer only. A manifest `skills` path replaces the default
+        # skills/ folder (measured on Codex 0.154: an existing folder without SKILL.md files loads no
+        # plugin skill and reports no error), so it must name such a folder.
+        data, error = load_json(CODEX_PLUGIN_MANIFEST)
+        if error:
+            self.fail(error)
+        skills = data.get("skills")
+        self.assertIsInstance(skills, str)
+        self.assertTrue(skills.startswith("./"))
+        folder = (PLUGIN_ROOT / skills).resolve()
+        self.assertTrue(folder.is_dir(), f"{skills} is not a folder of the plugin")
+        self.assertNotEqual(folder, (PLUGIN_ROOT / "skills").resolve())
+        self.assertEqual(sorted(str(path) for path in folder.rglob("SKILL.md")), [])
 
     def test_marketplace_source_resolves_to_plugin_root(self) -> None:
         data, error = load_json(MARKETPLACE_MANIFEST)
@@ -325,6 +447,61 @@ class LayoutTests(unittest.TestCase):
                     matchers = {name for group in matching for name in group.get("matcher", "").split("|")}
                     self.assertEqual(sorted(set(tools) - matchers), [], f"{script} does not cover these tools")
 
+    def load_codex_hooks(self) -> dict:
+        data, error = load_json(PLUGIN_ROOT / CODEX_HOOKS)
+        if error:
+            self.fail(error)
+        return data
+
+    def codex_handlers(self):
+        for event, groups in self.load_codex_hooks().get("hooks", {}).items():
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    yield event, group, hook
+
+    def test_codex_hooks_json_registers_every_hook(self) -> None:
+        handlers = list(self.codex_handlers())
+        for event, text in CODEX_REQUIRED_HOOKS:
+            with self.subTest(event=event, command=text):
+                self.assertTrue(
+                    any(found == event and text in hook.get("command", "") for found, _, hook in handlers),
+                    f"no {event} hook runs {text}",
+                )
+        self.assertEqual(len(handlers), len(CODEX_REQUIRED_HOOKS), "unexpected extra Codex handlers")
+        pre_tool_use = [group for event, group, _ in handlers if event == "PreToolUse"]
+        self.assertEqual([group.get("matcher") for group in pre_tool_use], [CODEX_PRE_TOOL_USE_MATCHER])
+        matcher = re.compile(CODEX_PRE_TOOL_USE_MATCHER)
+        for tool, expected in (("Bash", True), ("apply_patch", True), ("Read", False), ("mcp__fs__write", False)):
+            with self.subTest(tool=tool):
+                self.assertEqual(bool(matcher.search(tool)), expected)
+
+    def test_codex_hook_commands_quote_the_plugin_root(self) -> None:
+        # Codex substitutes ${PLUGIN_ROOT} into the command text (measured in app-server hooks/list), and
+        # a path with a space (a Windows user folder) would split into two arguments without quotes.
+        for event, _, hook in self.codex_handlers():
+            for field in ("command", "commandWindows"):
+                command = hook.get(field, "")
+                with self.subTest(event=event, field=field):
+                    self.assertIn('"${PLUGIN_ROOT}', command)
+                    self.assertIsNone(re.search(r'(?<!")\$\{PLUGIN_ROOT\}', command), "unquoted ${PLUGIN_ROOT}")
+                    self.assertNotIn("CLAUDE_PLUGIN_ROOT", command)
+
+    def test_codex_handlers_have_a_fail_closed_windows_command(self) -> None:
+        # On Windows Codex runs hooks through cmd.exe, where `bash ...` fails open; commandWindows runs the
+        # PowerShell launcher instead. The safety check must fail closed, the context hooks must not block.
+        for event, _, hook in self.codex_handlers():
+            windows = hook.get("commandWindows", "")
+            with self.subTest(event=event):
+                self.assertTrue(windows.startswith(CODEX_WINDOWS_LAUNCHER), windows)
+                arguments = windows[len(CODEX_WINDOWS_LAUNCHER):]
+                if event == "PreToolUse":
+                    self.assertEqual(arguments, "hooks/bash_safety.py --runtime codex")
+                    self.assertTrue(hook.get("command", "").endswith(" " + arguments))
+                else:
+                    self.assertTrue(arguments.startswith("-Advisory hooks/codex_context.py "), arguments)
+                self.assertNotIn("shell", hook, "the Claude-only shell field has no meaning in Codex")
+                self.assertIsInstance(hook.get("timeout"), int)
+
     def test_hook_commands_quote_the_plugin_root(self) -> None:
         # Claude Code 2.1.281 warns on an unquoted ${CLAUDE_PLUGIN_ROOT}, and a path with a space
         # (a Windows user folder) would split into two arguments.
@@ -368,6 +545,13 @@ class BaselineTests(unittest.TestCase):
                 self.assertNotIn("|", rule, "rules are matched per subcommand, so a pipe never matches")
                 self.assertFalse(rule.startswith("Task"), "an unanchored tool-name glob is skipped at load")
                 self.assertFalse(rule.startswith("Write("), "Write(path) rules are dead; Edit(path) gates every edit tool")
+
+    def test_bypass_mode_is_left_alone(self) -> None:
+        # Since 1.2.0 the baseline never locks bypass mode; the installer only takes back the 1.1.0 lock.
+        data = self.load_baseline()
+        self.assertNotIn("bypassLock", data)
+        visible = json.dumps({key: value for key, value in data.items() if not key.startswith("_")})
+        self.assertNotIn("disableBypassPermissionsMode", visible)
 
     def test_no_value_that_voids_the_settings_file(self) -> None:
         text = (PLUGIN_ROOT / "settings" / "baseline.json").read_text(encoding="utf-8")
@@ -445,14 +629,20 @@ class HygieneTests(unittest.TestCase):
     def scannable_text(self, path: Path, text: str) -> str:
         """The text minus the narrow, explicit exceptions for this file."""
         name = relative(path)
-        field = MANIFEST_AUTHOR_FIELDS.get(name)
-        if field:
+        if codex_allowed(name):
+            text = CODEX_WORD.sub("runtime", text)
+        fields = MANIFEST_AUTHOR_FIELDS.get(name)
+        if fields:
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 return text
-            if isinstance(data.get(field), dict) and data[field].get("name") == MANIFEST_AUTHOR:
-                data[field]["name"] = ""
+            for keys in fields:
+                parent = data
+                for key in keys[:-1]:
+                    parent = parent.get(key) if isinstance(parent, dict) else None
+                if isinstance(parent, dict) and parent.get(keys[-1]) == MANIFEST_AUTHOR:
+                    parent[keys[-1]] = ""
             return json.dumps(data, ensure_ascii=False)
         for allowed in LEAK_ALLOWLIST.get(name, ()):
             text = text.replace(allowed, "")
@@ -463,6 +653,15 @@ class HygieneTests(unittest.TestCase):
             self.fail(PRIVATE_PATTERNS_ERROR)
         if not PRIVATE_PATTERNS:
             sys.stderr.write(f"\nnote: {PRIVATE_PATTERNS_VARIABLE} is unset; the leak scan ran the public patterns only\n")
+
+    def test_codex_word_only_on_the_codex_side(self) -> None:
+        # Enforced even without the private patterns file, so a mention cannot creep into the Claude side.
+        for path, text in text_files().items():
+            if codex_allowed(relative(path)):
+                continue
+            with self.subTest(file=relative(path)):
+                lines = sorted({text.count("\n", 0, match.start()) + 1 for match in CODEX_WORD.finditer(text)})
+                self.assertEqual(lines, [], "Codex named outside the Codex-side files and the repository documents")
 
     def test_no_identity_or_private_tool_leaks(self) -> None:
         for path, text in text_files().items():

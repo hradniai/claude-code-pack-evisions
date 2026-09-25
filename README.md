@@ -8,13 +8,15 @@ installer for the matching Claude Code settings), a PRD interview, code and secu
 log for bugs and tech debt found along the way, and an admission check for third-party skills.
 
 The user manual for the team, written for non-developers, is [`USER-MANUAL.md`](USER-MANUAL.md).
+Since 1.2.0 the same repository also installs the safety baseline into OpenAI's Codex CLI; see
+[Using it with Codex](#using-it-with-codex).
 
 ## What the plugin gives
 
 | Component | Command or agent | What it does |
 |---|---|---|
 | Session hook | runs by itself | At session start, after `/clear` and after compaction, loads the documentation standard and a map of which skill or agent does which job (two of the three `SessionStart` handlers; the third is the safety protocol below). |
-| Safety protocol | runs by itself | At the same moments, tells Claude how to handle a block (stop, say what was blocked and why, give the user the exact command to run themselves, never work around it) and never to show a secret value; reports when Python is missing and whether the settings baseline is installed. |
+| Safety protocol | runs by itself | At the same moments, tells Claude how to handle a block (stop, say what was blocked and why, give the user the exact command to run themselves, never work around it) and never to show a secret value; reports when Python is missing and whether the settings baseline is installed. At session start it also checks the running Claude Code against the newest published version and, when it is behind, has Claude tell the user how to update. See [Claude Code version check](#claude-code-version-check). |
 | Safety hook | runs by itself | Before every `Bash`, `PowerShell`, `Read` and `Grep` call, blocks secret reads and destructive commands. See [Safety baseline](#safety-baseline). |
 | Time hook | runs by itself | Tells Claude the current local time on every message (Claude Code gives it only the date), so timestamps in the journals are right. |
 | Skill `checkpoint` | `/checkpoint` | Mid-session save: one worklog entry, a refreshed `WORKSTATE.md`, a local git commit of the touched files. Never pushes. |
@@ -72,7 +74,7 @@ claude plugin update evisions@claude-code-pack-evisions
 ```
 
 Then re-run `evisions-settings --apply` by path, so the new version's installer runs (see
-[Safety baseline](#safety-baseline)), and restart Claude Code. An update arrives only when the
+[Safety baseline](#safety-baseline)), restart Claude Code and run `evisions-settings --check`. An update arrives only when the
 `version` in the manifests changes. When installed from a local clone, `git pull` in the clone,
 `evisions-settings --apply` and a restart are enough.
 
@@ -87,6 +89,33 @@ claude plugin marketplace remove claude-code-pack-evisions
 The first line undoes the settings baseline and must run while the plugin is still there, because the
 installer ships with it; when the baseline was never applied, it reports that there is nothing to undo.
 Restart Claude Code afterwards.
+
+## Using it with Codex
+
+The same marketplace and the same `evisions` plugin install into OpenAI's Codex CLI, with the safety
+part only: the skills and agents above are Claude Code only in this release. The install, the required
+hook trust step, the check, the update and the removal are in [`CODEX.md`](CODEX.md); Codex can follow
+it itself when opened in a clone of this repository and told "install it following CODEX.md". In short:
+
+```bash
+codex plugin marketplace add hradniai/claude-code-pack-evisions
+codex plugin add evisions@claude-code-pack-evisions
+```
+
+then the settings installer `evisions-codex-settings` from the plugin folder, a Codex restart with
+"Trust all and continue" on the "Hooks need review" screen (without it no hook runs), and
+`evisions-codex-settings --check`, which must exit 0. Codex stores the short marketplace form as an
+HTTPS address, so no SSH key is needed there.
+
+| Codex-side file | What it does |
+|---|---|
+| `.agents/plugins/marketplace.json` | The marketplace entry Codex reads (Claude Code reads `.claude-plugin/marketplace.json`). |
+| `plugins/evisions/.codex-plugin/plugin.json` | The Codex manifest: loads only `hooks/codex-hooks.json`, no skills or agents. |
+| `plugins/evisions/hooks/codex-hooks.json` | Three hooks: the safety check before every shell command and `apply_patch` edit, the safety protocol at session start, the local time on every message. |
+| `plugins/evisions/hooks/bash_safety.py --runtime codex` | The same safety check in Codex mode: adds destructive git in every form (`git -C` included), `apply_patch` edits of env, credential, shell startup and Codex control files, and attempts to switch the safety off. |
+| `plugins/evisions/context/safety-codex.md` | The safety protocol text for Codex. |
+| `plugins/evisions/hooks/run-python.ps1`, `hooks/codex_context.py` | The fail-closed Windows launcher and the Windows variant of the context hooks (untested on Windows). |
+| `plugins/evisions/bin/evisions-codex-settings` | Settings installer for the Codex home: 21 forbidden command rules (`settings/codex-baseline.rules`), environment filters that keep secret-looking variables away from commands, a marked safety block in the global `AGENTS.md`, and an optional deny-read profile. Dry run by default; `--apply`, `--check`, `--remove`, `--restore-declined`, `--deny-read`, `--profile`. |
 
 ## Safety baseline
 
@@ -134,7 +163,7 @@ running session's `PATH` may still belong to the version that session started wi
 |---|---|
 | `evisions-settings` | Dry run: prints the profile and why it was chosen, and what would be added. Writes nothing. |
 | `evisions-settings --apply` | Backs up the settings file, then adds only what is missing. Refuses a settings file that is not valid JSON, never removes or changes the user's own entries, and records what it added. Safe to re-run: after a plugin update it brings the settings in line with the new baseline, adding new rules and removing rules it added earlier that the new baseline dropped. An apply that was interrupted is finished by the next run, and a record of what it added that was edited or damaged makes it refuse and write nothing. |
-| `evisions-settings --check` | Exits 0 when the baseline is installed, 1 with a list of what is missing or changed. |
+| `evisions-settings --check` | Checks the whole settings file first, one line per problem: an `Error` is something that makes Claude Code ignore the file or skip a value or rule (invalid JSON, `cleanupPeriodDays` below 1, a malformed rule), a `Warning` is a rule that loads but does not work as written (a `\|` in it, `Write(path)` in deny or ask, a wildcard tool name in allow) or that editors validating `settings.json` against the official schema flag (an unknown tool name), and `attribution: false`, which versions before 2.1.281 reject. Then it reports whether the baseline is installed and intact. Exits 1 on an error or a missing baseline item, 0 when there are warnings only. |
 | `evisions-settings --apply --restore-declined` | Adds back the baseline items the user removed earlier, which later applies otherwise leave out. |
 | `evisions-settings --remove` | Backs up, then undoes exactly what it added. Entries the user changed or added themselves stay. When it created the settings file and nothing else is left in it, it deletes the file instead of leaving an empty one. Without a record it reports that there is nothing to undo. |
 | `--no-statusline` | Skips the status line. |
@@ -151,23 +180,29 @@ The profile is detected automatically, from whether an administrator policy file
 the platform:
 
 - **`standard`**: no administrator policy on the machine, typically a laptop. Adds permission rules:
-  85 allow rules for everyday safe commands, so Claude does not ask about every `ls` or `git status`;
+  83 allow rules for everyday safe commands, so Claude does not ask about every `ls` or `git status`;
   83 deny rules for destructive commands and secret files; 27 ask rules for installs, pushes,
   deletions and similar. Every git deny rule, and the ask rules for `git push`, `rebase` and `merge`,
   has a `git -C <dir> ...` twin, because a rule such as `Bash(git reset --hard*)` does not match
-  `git -C . reset --hard` (measured on Claude Code 2.1.281). Turns bypass mode off
-  (`disableBypassPermissionsMode: "disable"`). Keeps transcripts for 10 years
+  `git -C . reset --hard` (measured on Claude Code 2.1.281). Keeps transcripts for 10 years
   (`cleanupPeriodDays: 3650`; Claude Code's default is 30 days, after which `/resume` loses older
   sessions). Turns off telemetry and error reporting
   (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) and feedback surveys. Sets a three-line status line
   (model, project and git branch, how full the context is, 5-hour and 7-day usage) when the user has
   none.
 - **`managed`**: the machine has an administrator's Claude Code policy, for example the company server
-  containers. That policy owns permissions and bypass mode, and the administrator's environment owns
-  telemetry, so the installer adds no permission rules, does not touch bypass mode and sets no
-  environment variables; it applies only transcript retention, the feedback survey setting, and the
-  status line when absent. An env var an earlier standard install set is taken back when the profile
-  becomes managed.
+  containers. That policy owns permissions, and the administrator's environment owns telemetry, so the
+  installer adds no permission rules and sets no environment variables; it applies only transcript
+  retention, the feedback survey setting, and the status line when absent. An env var an earlier
+  standard install set is taken back when the profile becomes managed.
+
+Neither profile touches bypass mode (`--dangerously-skip-permissions`), and every rule the installer
+writes matches the official settings schema, so editors show no error in `settings.json`. Version
+1.1.0 turned bypass mode off (`permissions.disableBypassPermissionsMode: "disable"`) and added two
+allow rules the schema rejects (`ListMcpResourcesTool`, `ReadMcpResourceTool`); the next `--apply`
+takes all three back, but a lock the user set themselves stays. In bypass mode Claude stops asking
+before most actions, but the deny rules still block, the safety hook still runs and the ask rules
+(installs, pushes, deletions) still ask; allow rules have no effect there.
 
 In both profiles a scalar setting or env var is set only when the user has no value of their own, and
 an existing status line is never replaced. On the standard profile, `DISABLE_TELEMETRY` also switches
@@ -177,6 +212,30 @@ their settings. The installer treats any baseline item the user removes (a setti
 their choice: later applies leave it out and list it as declined, and
 `evisions-settings --apply --restore-declined` brings such items back. Settings take effect after
 Claude Code restarts.
+
+## Claude Code version check
+
+At every session start (not after `/clear` or compaction) the safety protocol hook compares the
+running Claude Code with the newest version published on the npm registry
+(`https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags`: the `latest` tag, or
+`stable` when the user's settings set `"autoUpdatesChannel": "stable"` or Claude Code runs from
+Homebrew's `claude-code` cask). When the running version is older, Claude tells the user at the start
+of the conversation, and Claude Code shows a warning line, with the update commands: `claude update`
+(native installer), `npm install -g @anthropic-ai/claude-code@latest` (npm), `brew upgrade claude-code`
+or `brew upgrade claude-code@latest` (Homebrew), `winget upgrade Anthropic.ClaudeCode` (WinGet). On the
+company server containers automatic updates are off and the administrator updates Claude Code.
+
+The lookup is one `curl` request with a 3-second limit. Its answer is cached for 6 hours in the
+plugin's data folder (`$CLAUDE_PLUGIN_DATA`, else `evisions/` in the Claude Code config folder), a
+failed lookup for 1 hour, so most starts make no request and an offline machine waits at most once an
+hour. Offline, without `curl`, or with an unreadable answer, nothing is said; only when the running
+version cannot be determined either does Claude get one neutral line. With
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, no request is made. The running version comes from the
+executable Claude Code names in `CLAUDE_CODE_EXECPATH` (measured on 2.1.282; 2.1.199 does not set it),
+else from `claude --version` on the `PATH`. That fallback can read a different install when a machine
+has several (measured: 2.1.199 running beside a newer global install produced no warning); with a
+single install, as on the company server containers, it reads the running one (measured: 2.1.199 got
+the warning line and the `systemMessage`). The Homebrew cask detection and Windows are not measured.
 
 ## Files it creates in a project
 
@@ -271,8 +330,8 @@ claude plugin validate plugins/evisions
 
 The unit tests cover the hooks, the settings installer, the helpers and the skill scanner as well as
 the plugin contract. Every release
-raises `version` in both `.claude-plugin/marketplace.json` and
-`plugins/evisions/.claude-plugin/plugin.json`; the contract test fails when they disagree.
+raises `version` in `.claude-plugin/marketplace.json`, `plugins/evisions/.claude-plugin/plugin.json`
+and `plugins/evisions/.codex-plugin/plugin.json`; the contract test fails when they disagree.
 
 Left out of the general starter pack's kernel on purpose: a large-file read guard (it blocked
 screenshots, and Claude Code's Read tool now truncates large files itself), four pipe deny rules that

@@ -179,7 +179,7 @@ Claude runs commands (short instructions for the computer, the kind you would ty
 
 **Claude refused something I really want.** That is the safety check at work. Claude is told not to get around it, so rephrasing the request does not help. If you are sure, run the command Claude gave you yourself, in a terminal (the window where you type commands).
 
-**Claude asks for permission more often than before.** On a laptop, the optional settings step turns off bypass mode (a way of starting Claude Code so that it does everything without asking) and makes Claude ask before installing software, sending changes to a shared server (a push) or deleting files. That is on purpose. Everyday harmless commands, such as listing files, still run without a question.
+**Claude asks for permission more often than before.** On a laptop, the optional settings step makes Claude ask before installing software, sending changes to a shared server (a push) or deleting files. That is on purpose. Everyday harmless commands, such as listing files, still run without a question. These few questions come even when you start Claude Code with the `cc` shortcut (see [A shortcut for starting without questions](#a-shortcut-for-starting-without-questions)), because the kit asks for them in every mode.
 
 **Will Claude send anything out without my knowing?** No. `/checkpoint` and `/end` save versions only on your machine. Nothing goes to a shared server until you answer "yes" to the question in `/end`.
 
@@ -204,6 +204,8 @@ Then restart Claude Code.
 
 **The settings step (optional).** Claude Code does not let a plugin change its settings, so the kit brings a small installer, `evisions-settings`. Run on its own, it only shows what it would change and changes nothing (a dry run). With `--apply` it makes the changes, keeps a backup of your previous settings, and can undo them later. When Claude installs the kit, it runs the dry run, explains the plan and applies it only after your yes. If you installed the kit yourself, ask Claude after the restart: "Run evisions-settings and tell me what it would change." If you agree, let it run `evisions-settings --apply`, then restart Claude Code once more so the settings take effect.
 
+**Checking your settings.** Ask Claude "Run evisions-settings --check" at any time, or run it yourself. It goes through your whole settings file, not only the kit's part, and writes one line per problem it finds: `Error` means Claude Code ignores the file or a part of it, `Warning` means something that does not work as written, or that an editor such as VS Code marks as an error. At the end it says whether the kit's settings are in place. The installation ends with this check.
+
 To update, run these two commands:
 
 ```
@@ -212,3 +214,54 @@ claude plugin update evisions@claude-code-pack-evisions
 ```
 
 Then restart Claude Code, ask Claude to run `evisions-settings --apply` so your settings follow the new version, and restart once more. If you skipped the settings step, you can skip this too, or do it now.
+
+## Keeping Claude Code up to date
+
+At the start of every conversation the kit checks whether a newer Claude Code has been published than the one you are running. If so, Claude tells you right at the start, a warning line appears on screen, and you get the command to update. To look this up, the kit asks the public npm registry (the place Claude Code is published from) at most once every six hours, and the question carries nothing about your work. Without an internet connection it simply says nothing.
+
+To update, run the command that matches how Claude Code was installed, in a terminal, then quit Claude Code and start it again. If you do not know how it was installed, `claude doctor` tells you on its `Running:` line.
+
+- The standard installer (most people): `claude update`
+- Installed with npm: `npm install -g @anthropic-ai/claude-code@latest`
+- Installed with Homebrew on a Mac: `brew upgrade claude-code` (or `brew upgrade claude-code@latest`, if that is the one you installed)
+- Installed with WinGet on Windows: `winget upgrade Anthropic.ClaudeCode`
+
+On the company server containers you do not update anything yourself: automatic updates are turned off there, and the administrator updates Claude Code for everyone. If Claude tells you there about a newer version, let the administrator know.
+
+## A shortcut for starting without questions
+
+Claude Code can be started so that it does not stop to ask before each action: `claude --dangerously-skip-permissions`, called bypass mode. The kit's settings do not turn it off. The kit's safety check keeps working in bypass mode, and with the kit's settings step done, the commands those settings refuse stay refused and Claude still asks before installing software, sending changes to a shared server (a push) or deleting files. Everything else runs without a question, so use it only when you are happy for Claude to work on its own.
+
+If you use it often, a short command helps: `cc`. You set it up once, yourself, in a terminal (the window where you type commands). Claude does not do this step for you: the files that set up your terminal are yours, and with the kit's settings Claude is not even allowed to change them. Run the one command for your computer:
+
+- Mac:
+
+  ```
+  echo "alias cc='claude --dangerously-skip-permissions'" >> ~/.zshrc
+  ```
+
+  Then run `source ~/.zshrc`, or open a new terminal window.
+- Linux, or Git Bash on Windows:
+
+  ```
+  echo "alias cc='claude --dangerously-skip-permissions'" >> ~/.bashrc
+  ```
+
+  Then run `source ~/.bashrc`, or open a new terminal window.
+- Windows PowerShell:
+
+  ```
+  if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }; Add-Content -Path $PROFILE -Value 'function cc { claude --dangerously-skip-permissions @args }'
+  ```
+
+  Then run `. $PROFILE`, or open a new PowerShell window. If PowerShell says that running scripts is disabled, ask whoever manages your computer.
+
+To test it, type `cc --version`: it must print the Claude Code version. From then on `cc` starts Claude Code in bypass mode, and plain `claude` starts it with the questions as before. One side effect: computers have a program for building software that is also called `cc`, and your shortcut now hides it in the terminal. If you ever need that program, type `command cc`. On the company server containers `cc` is already set up, so skip this there.
+
+## Using it with Codex
+
+If you work in OpenAI's Codex CLI (the command line app that comes with a ChatGPT subscription), the kit's safety check works there too. Codex gets only the safety part: `/checkpoint`, `/end` and the other helpers described above are for Claude Code only for now.
+
+To install it, download the repository as described above, open Codex in that folder and write "Install it following CODEX.md." Codex shows you each command before running it and waits for your yes. One step only you can do: after the install, quit Codex, start it again, and on the screen "Hooks need review" choose "Trust all and continue". Hooks are the small programs the kit runs before every command. Until you trust them, Codex does not run them, and the safety check is off. After an update Codex may show the screen again; trust them again.
+
+In Codex the check stops the same kinds of action as described in the safety section above, and also git commands that throw away work or overwrite shared history, and attempts to switch the check off. It keeps working when Codex is started in its mode that does everything without asking (`--yolo`). The message again starts with `evisions safety:`. If Codex tells you at the start of a conversation that the evisions safety hooks are not active, the trust step is missing: type `/hooks` in Codex and trust them. The details, including what the check does not cover, are in [`CODEX.md`](CODEX.md).

@@ -25,7 +25,11 @@ on the text and on a copy with empty quote pairs and in-word escapes removed.
 What it blocks:
 - recursive deletion anywhere in a command, with or without a force flag: rm -r, -R or --recursive,
   find -delete, Remove-Item -Recurse and its aliases, rd /s. In Claude's non-interactive shell
-  `rm -r` deletes without asking, exactly like `rm -rf`.
+  `rm -r` deletes without asking, exactly like `rm -rf`. Inline interpreter code (-c, -e, a heredoc,
+  stdin) that calls rmtree, remove_tree, remove_dir_all, FileUtils.rm_r and kin, or rmSync, rmdirSync,
+  rm or remove with `recursive`, counts too.
+- a git alias defined on the command line with a `!` (a shell command) or a hidden value
+  (`git -c alias.x='!...' x`, `--config-env alias.x=VAR`); in Codex mode every such alias
 - reading secret VALUES from env files into the conversation (policy below)
 - reading SSH keys, GPG keyrings, cloud and registry credentials, git credentials, browser data
 - download-and-execute: a download piped into a shell or into an interpreter that reads its script
@@ -63,6 +67,28 @@ combined with a web download. The PowerShell-only aliases (gc, type, sls, ...) c
 PowerShell tool. Backslashes become slashes before any path matching, because Windows paths arrive
 with backslashes.
 
+Codex mode (`--runtime codex`, registered by hooks/codex-hooks.json): Codex sends shell commands as
+tool `Bash` with `tool_input.command` (on Windows those are PowerShell commands, so there both dialects
+are checked) and file edits as tool `apply_patch` with the raw patch text in `tool_input.command`.
+On top of every check above, Codex mode blocks what the Claude side leaves to permission rules, which
+Codex rules cannot express (`git -C <dir> ...`, absolute binary paths) and Codex hooks cannot ask for:
+- destructive git in every form (`git -C <dir>`, `git -c k=v`, `--git-dir`, `/usr/bin/git`): force
+  push (`--force`, `-f`, `--force-with-lease`, a `+refspec`), `reset --hard`, `checkout -- <paths>`,
+  `clean -f`/`-d`, `branch -D`, `commit --no-verify`/`-n`/`-a`;
+- self-escape: a nested `codex` with `--ignore-rules`, `--ignore-user-config`,
+  `--dangerously-bypass-hook-trust`, `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, a
+  `--disable`/`-c` override that switches hooks or plugins off, `codex features disable hooks` and
+  `codex plugin remove`; and shell writes (redirections, tee, cp, mv, rm, sed -i, ...) into Codex's
+  control files: `config.toml`, `*.config.toml`, `hooks.json`, `rules/`, `AGENTS.md`,
+  `AGENTS.override.md` and `plugins/` in `$CODEX_HOME` or `~/.codex`, and `/etc/codex`;
+- apply_patch edits (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) of a hard
+  env file, a credential path, a shell startup file in the home folder, `~/.ssh` or a Codex control
+  file, relative paths resolved against the session directory;
+- reads of the Codex login (`auth.json` in the Codex home), like any other credential.
+The plugin's bin/ folder is not on PATH in Codex, so the absolute path of this plugin's own
+`bin/list-env-keys` (derived from this file's location, and only that exact path) counts as the bare
+command; hooks/safety-start prints that path into the session.
+
 Exit codes: 0 allows the call, 2 blocks it with the reason on stderr. Every block message starts
 with `evisions safety:` so a block can be attributed to this plugin.
 """
@@ -70,10 +96,15 @@ with `evisions safety:` so a block can be attributed to this plugin.
 import json
 import os
 import re
+import shlex
 import sys
 
 PREFIX = "evisions safety:"
 HELPER = "list-env-keys"
+CLAUDE, CODEX = "claude", "codex"
+# The runtime this process checks for, set once by main() from --runtime before anything is
+# evaluated. The hook is one short process per tool call, so a module-level setting is enough.
+RUNTIME = CLAUDE
 SHOWN_LIMIT = 400  # characters of the blocked command repeated in the message
 NESTING_LIMIT = 10  # levels of $(...), sh -c and similar followed before giving up
 
@@ -717,13 +748,63 @@ SECRET_PATTERNS = [
 ]
 
 
+CODEX_LOGIN = "the Codex login (auth.json)"
+# Secret paths checked only in Codex mode; configure() fills it.
+EXTRA_SECRET_PATTERNS = []
+
+
+def codex_secret_patterns():
+    """The Codex login file under ~/.codex, $CODEX_HOME or the configured CODEX_HOME folder."""
+    patterns = [
+        (re.compile(SECRET_BOUNDARY + r"\.codex/auth\.json(?![\w.-])", re.IGNORECASE), CODEX_LOGIN, ".codex/auth.json"),
+        (
+            re.compile(r"(?:\$\{?CODEX_HOME\}?|\$env:CODEX_HOME|%CODEX_HOME%)/auth\.json(?![\w.-])", re.IGNORECASE),
+            CODEX_LOGIN,
+            "auth.json",
+        ),
+    ]
+    configured = os.environ.get("CODEX_HOME", "").replace("\\", "/").rstrip("/")
+    if configured:
+        patterns.append((re.compile(re.escape(configured) + r"/auth\.json(?![\w.-])", re.IGNORECASE), CODEX_LOGIN, "auth.json"))
+    return patterns
+
+
 def secret_match(text):
     """The label of the first secret path in text, or None."""
     lowered = text.lower()
-    for pattern, label, needle in SECRET_PATTERNS:
+    for pattern, label, needle in SECRET_PATTERNS + EXTRA_SECRET_PATTERNS:
         if needle in lowered and pattern.search(text):
             return label
     return None
+
+
+def path_key(path):
+    """A path in comparable form: `~` expanded, slashes unified, normalized (case-folded on Windows)."""
+    return os.path.normcase(os.path.normpath(os.path.expanduser(path.replace("\\", "/"))))
+
+
+HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def trusted_helper_paths():
+    """The absolute path of this plugin's own bin/list-env-keys, as run and as resolved."""
+    roots = {os.path.dirname(HOOK_DIR), os.path.dirname(os.path.realpath(HOOK_DIR))}
+    return {path_key(os.path.join(root, "bin", HELPER)) for root in roots}
+
+
+def is_trusted_helper(value):
+    """True when a command word is the plugin's own list-env-keys: the bare name found on PATH, and in
+    Codex mode (where bin/ is not on PATH) also its exact absolute path, never another path ending in it."""
+    if value == HELPER:
+        return True
+    return RUNTIME == CODEX and os.path.isabs(os.path.expanduser(value.replace("\\", "/"))) and path_key(value) in trusted_helper_paths()
+
+
+def helper_command():
+    """How a block message tells the agent to start list-env-keys."""
+    if RUNTIME == CODEX:
+        return '"%s"' % os.path.join(os.path.dirname(HOOK_DIR), "bin", HELPER).replace("\\", "/")
+    return HELPER
 
 
 def env_message(action, name):
@@ -733,7 +814,7 @@ def env_message(action, name):
         "holds without their values, run `%s --from %s` (add --classify to see whether each key is "
         "empty, a placeholder or filled). `.env.shared` and placeholder files such as `.env.example` "
         "are readable, and passing an env file as configuration (for example `--env-file .env`) is "
-        "fine." % (action, name, HELPER, name.replace("\\", "/"))
+        "fine." % (action, name, helper_command(), name.replace("\\", "/"))
     )
 
 
@@ -888,9 +969,15 @@ def read_reason(scripts, texts):
                 elif is_reader(name, dialect):
                     operands = file_operands(view, dialect)
                     trigger = trigger or view.indirect
-                elif name == HELPER and command_word.value != HELPER:
+                elif name == HELPER and not is_trusted_helper(command_word.value):
                     for word in args:
                         if env_name_hard(command_name(word.value)):
+                            if RUNTIME == CODEX:
+                                return (
+                                    "only the plugin's own list-env-keys, run by its absolute path %s, may "
+                                    "open a hard env file; `%s` could be any script and could print the values."
+                                    % (helper_command(), command_word.value)
+                                )
                             return (
                                 "only the bare command `%s` (the plugin's tool on PATH) may open a hard "
                                 "env file; `%s` could be any script and could print the values."
@@ -1125,6 +1212,583 @@ PS_RISKY_FLAG = re.compile(
 )
 
 
+# === inline recursive deletion and command-line git aliases (both runtimes) =====================
+# Library calls that delete a folder tree, in the inline code an interpreter gets (-c, -e, a heredoc,
+# stdin). The node and deno calls count only with `recursive` close behind, so a single-file
+# `fs.rmSync('x.txt')` stays allowed.
+INLINE_RECURSIVE_DELETE = re.compile(
+    r"\b(?:rmtree|remove_tree|remove_dir_all)\b"
+    r"|\bFileUtils\s*\.\s*(?:rm_r|rm_rf|remove_dir|remove_entry(?:_secure)?)\b"
+    r"|\b(?:rmSync|rmdirSync|rm|rmdir|remove)\s*\((?:(?!\n\n).){0,300}?\brecursive\b",
+    re.DOTALL,
+)
+INLINE_RM_MESSAGE = (
+    "this command runs inline code that deletes a folder tree (%s). Recursive deletion is blocked in every "
+    "form, inline interpreter code included. If the deletion is really wanted, the user runs it themselves."
+)
+
+# Global options of git that take a separate value; every other option before the subcommand is one word.
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+GIT_TAIL = " If it is really wanted, the user runs it themselves."
+
+
+def git_settings(view):
+    """(key, value, hidden) for each configuration setting given before git's subcommand: `-c k=v`
+    (also --config), and `--config-env k=VAR`, whose value comes from a variable and is hidden."""
+    words = view.words
+    settings = []
+    k = 1
+    while k < len(words):
+        value = words[k].value
+        if value in ("-c", "--config", "--config-env") and k + 1 < len(words):
+            key, _, setting = words[k + 1].value.partition("=")
+            settings.append((key, setting, value == "--config-env"))
+            k += 2
+            continue
+        if value.startswith(("--config=", "--config-env=")):
+            option, _, rest = value.partition("=")
+            key, _, setting = rest.partition("=")
+            settings.append((key, setting, option == "--config-env"))
+        elif value in GIT_VALUE_OPTIONS:
+            k += 2
+            continue
+        elif not value.startswith("-"):
+            break
+        k += 1
+    return settings
+
+
+def git_alias_reason(view):
+    """Block reason for a git alias defined on the command line, else None. A `!` alias runs any shell
+    command and the alias hides what git will do, so the other checks cannot see it. Claude Code blocks
+    the shell aliases (and hidden values); in Codex mode, where git rules cannot be expressed, every one."""
+    if view.name != "git":
+        return None
+    for key, value, hidden in git_settings(view):
+        if not key.strip().strip("'\"").lower().startswith("alias."):
+            continue
+        if RUNTIME == CODEX or hidden or value.lstrip().startswith("!"):
+            return (
+                "this command defines a git alias on the command line (%s), which hides what git will "
+                "really run, and a `!` alias runs any shell command. Run the git command itself; an alias "
+                "the user wants belongs in their own git config." % key.strip()
+                + GIT_TAIL
+            )
+    return None
+
+
+# === Codex mode: destructive git ================================================================
+
+
+def git_subcommand(view):
+    """(subcommand, its argument words) after git's global options (-C, -c, --git-dir, ...)."""
+    words = view.words
+    k = 1
+    while k < len(words):
+        value = words[k].value
+        if value in GIT_VALUE_OPTIONS:
+            k += 2
+        elif value.startswith("-"):
+            k += 1
+        else:
+            return value, words[k + 1:]
+    return None, []
+
+
+def short_letters(value):
+    """The letters of a single-dash option cluster (`-fu` -> `fu`), else ''."""
+    return value[1:] if len(value) > 1 and value[0] == "-" and value[1] != "-" else ""
+
+
+def cluster_has(letters, wanted, value_letters=""):
+    """True when a cluster holds a wanted letter before a letter that takes a value (the rest is data)."""
+    for letter in letters:
+        if letter in wanted:
+            return True
+        if letter in value_letters:
+            return False
+    return False
+
+
+def push_is_forced(args):
+    k = 0
+    while k < len(args):
+        value = args[k].value
+        if value == "--":
+            return any(word.value.startswith("+") and len(word.value) > 1 for word in args[k + 1:])
+        name = value.split("=", 1)[0]
+        if name in ("--force", "--force-with-lease"):
+            return True
+        if name in ("--repo", "--receive-pack", "--exec", "--push-option") and "=" not in value:
+            k += 2
+            continue
+        letters = short_letters(value)
+        if letters:
+            if cluster_has(letters, "f", "o"):
+                return True
+            if letters.endswith("o"):
+                k += 1  # -o <push option>
+        elif value.startswith("+") and len(value) > 1:
+            return True  # +refspec forces that ref
+        k += 1
+    return False
+
+
+COMMIT_VALUE_OPTIONS = {
+    "--message", "--file", "--reuse-message", "--reedit-message", "--template", "--author", "--date",
+    "--cleanup", "--fixup", "--squash", "--trailer", "--pathspec-from-file",
+}
+
+
+def commit_reason(args):
+    k = 0
+    while k < len(args):
+        value = args[k].value
+        if value == "--":
+            return None
+        name = value.split("=", 1)[0]
+        if name == "--no-verify":
+            return "this command skips the repository's commit hooks (git commit --no-verify)."
+        if name == "--all":
+            return (
+                "git commit --all stages every tracked change at once. Stage the paths the work touched "
+                "with `git add <paths>` and commit without --all."
+            )
+        if name in COMMIT_VALUE_OPTIONS and "=" not in value:
+            k += 2
+            continue
+        letters = short_letters(value)
+        for index, letter in enumerate(letters):
+            if letter == "n":
+                return "this command skips the repository's commit hooks (git commit -n)."
+            if letter == "a":
+                return (
+                    "git commit -a stages every tracked change at once. Stage the paths the work touched "
+                    "with `git add <paths>` and commit without -a."
+                )
+            if letter in "mFCct":
+                if index == len(letters) - 1:
+                    k += 1  # the value is the next word
+                break
+            if letter in "Su":
+                break  # an optional value attached to the flag
+        k += 1
+    return None
+
+
+def git_reason(view):
+    """Block reason for a destructive git command, else None."""
+    if view.name != "git":
+        return None
+    sub, args = git_subcommand(view)
+    values = [word.value for word in args]
+    if sub == "push" and push_is_forced(args):
+        return (
+            "this command force-pushes (--force, -f, --force-with-lease or a +refspec), which can "
+            "overwrite commits on the remote for everyone." + GIT_TAIL
+        )
+    if sub == "reset" and "--hard" in values:
+        return "this command runs git reset --hard, which throws away uncommitted work for good." + GIT_TAIL
+    if sub == "checkout" and "--" in values and values.index("--") < len(values) - 1:
+        return (
+            "this command runs git checkout -- <paths>, which throws away uncommitted changes in those "
+            "files for good." + GIT_TAIL
+        )
+    if sub == "clean" and any(
+        value == "--force" or cluster_has(short_letters(value), "fd", "e") for value in values
+    ):
+        return "this command runs git clean with -f or -d, which deletes untracked files for good." + GIT_TAIL
+    if sub == "branch":
+        clusters = [short_letters(value) for value in values]
+        deletes = any("d" in letters for letters in clusters) or "--delete" in values
+        forced = any("f" in letters for letters in clusters) or "--force" in values
+        if any(cluster_has(letters, "D", "u") for letters in clusters) or (deletes and forced):
+            return (
+                "this command force-deletes a branch (git branch -D), which can lose commits that were "
+                "never merged." + GIT_TAIL
+            )
+    if sub == "commit":
+        reason = commit_reason(args)
+        if reason:
+            return reason + GIT_TAIL
+    return None
+
+
+# === Codex mode: self-escape ====================================================================
+CODEX_NAMES = {"codex", "codex.cmd", "codex.ps1"}
+CODEX_BYPASS_FLAGS = (
+    "--ignore-rules", "--ignore-user-config", "--dangerously-bypass-hook-trust",
+    "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+)
+CODEX_GUARDED_FEATURES = {"hooks", "plugins", "plugin_hooks"}
+ESCAPE_TAIL = (
+    " It would switch off the safety layer the user set up (rules, user config, hooks or plugins). "
+    "Changing that is the user's decision; give them the command if they want it."
+)
+
+
+def codex_arguments(view):
+    """The arguments of a codex run (`codex ...`, `npx @openai/codex ...`), or None for another command."""
+    if view.name in CODEX_NAMES:
+        return [word.value for word in view.words[1:]]
+    if view.name in ("npx", "pnpx", "bunx"):
+        for k, word in enumerate(view.words[1:], start=1):
+            value = word.value
+            if value.startswith("-"):
+                continue
+            if value in ("codex", "@openai/codex") or value.startswith("@openai/codex@"):
+                return [word.value for word in view.words[k + 1:]]
+            return None
+    return None
+
+
+def disables_guarded_setting(setting):
+    """True for a `-c key=value` override that turns hooks or plugins off or rewrites them."""
+    key = setting.split("=", 1)[0].strip().strip("'\"").lower()
+    if key in ("features", "hooks", "plugins") or key.startswith(("hooks.", "plugins.")):
+        return True
+    return key.startswith("features.") and key[len("features."):] in CODEX_GUARDED_FEATURES
+
+
+def codex_escape_reason(view):
+    args = codex_arguments(view)
+    if args is None:
+        return None
+    lowered = [value.lower() for value in args]
+    for index, value in enumerate(args):
+        name = value.split("=", 1)[0]
+        if name in CODEX_BYPASS_FLAGS:
+            return "this command starts a nested codex with %s." % name + ESCAPE_TAIL
+        following = args[index + 1] if index + 1 < len(args) else ""
+        if name == "--disable":
+            feature = value.split("=", 1)[1] if "=" in value else following
+            if feature.strip().lower() in CODEX_GUARDED_FEATURES:
+                return "this command starts codex with --disable %s." % feature + ESCAPE_TAIL
+        setting = None
+        if value in ("-c", "--config"):
+            setting = following
+        elif value.startswith("--config="):
+            setting = value[len("--config="):]
+        elif value.startswith("-c") and not value.startswith("--") and len(value) > 2:
+            setting = value[2:]
+        if setting and disables_guarded_setting(setting):
+            return "this command starts codex with the override %s." % setting + ESCAPE_TAIL
+    for index in range(len(lowered) - 1):
+        if lowered[index] == "features" and lowered[index + 1] == "disable" and any(
+            value in CODEX_GUARDED_FEATURES for value in lowered[index + 2:]
+        ):
+            return "this command disables a Codex feature the safety layer needs (hooks or plugins)." + ESCAPE_TAIL
+        if lowered[index] == "plugin" and lowered[index + 1] in ("remove", "uninstall"):
+            return "this command uninstalls a Codex plugin, which can remove this safety check." + ESCAPE_TAIL
+    return None
+
+
+# === Codex mode: Codex's own control files ======================================================
+# Lowercase name -> how a message names it (the comparison is case-insensitive, as on macOS and Windows).
+CONTROL_FILES = {"config.toml": "config.toml", "hooks.json": "hooks.json", "agents.md": "AGENTS.md", "agents.override.md": "AGENTS.override.md"}
+CONTROL_FOLDERS = {"rules", "plugins"}
+CONTROL_NAMES = r"(?:config\.toml|[\w.-]+\.config\.toml|hooks\.json|AGENTS(?:\.override)?\.md|rules|plugins)"
+# A control file named in text: after a `.codex` folder or a CODEX_HOME variable, or /etc/codex and its
+# Windows counterpart. Used for inline interpreter code and for paths with an unknown variable in them.
+CONTROL_MENTION = re.compile(
+    r"(?:\.codex|\$\{?CODEX_HOME\}?|\$env:CODEX_HOME|%CODEX_HOME%)[/\\]" + CONTROL_NAMES + r"(?![\w.-])"
+    r"|(?:^|(?<=[\s'\"=:(]))[/\\]etc[/\\]codex(?![\w.-])|ProgramData[/\\]OpenAI[/\\]Codex(?![\w.-])",
+    re.IGNORECASE,
+)
+HOME_PREFIX = re.compile(r"^(?:~|\$HOME|\$\{HOME\}|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%)(?=/|$)", re.IGNORECASE)
+CODEX_HOME_PREFIX = re.compile(r"^(?:\$CODEX_HOME|\$\{CODEX_HOME\}|\$env:CODEX_HOME|%CODEX_HOME%)(?=/|$)", re.IGNORECASE)
+WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:/")
+CONTROL_TAIL = (
+    " Codex's configuration, rules, hooks and plugins decide what runs unchecked in this and every later "
+    "session, so only the user changes them; give them the exact change if they want it."
+)
+
+
+def codex_home():
+    return os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+
+
+def control_roots():
+    """(comparable lowercase path, "home" or "system") of every Codex home and system folder, each as
+    written and as resolved through symlinks."""
+    roots = []
+    for home in (os.environ.get("CODEX_HOME"), os.path.join(os.path.expanduser("~"), ".codex")):
+        if home:
+            for variant in (home, os.path.realpath(os.path.expanduser(home))):
+                roots.append((path_key(variant).lower(), "home"))
+    for system in ("/etc/codex", os.path.join(os.environ.get("ProgramData") or "C:/ProgramData", "OpenAI", "Codex")):
+        roots.append((path_key(system).lower(), "system"))
+    return roots
+
+
+def expand_known(value):
+    """The path with ~, $HOME, $CODEX_HOME and their PowerShell and cmd spellings expanded, or None
+    when another variable or substitution remains that cannot be known before the command runs."""
+    path = value.replace("\\", "/")
+    match = CODEX_HOME_PREFIX.match(path)
+    if match:
+        path = codex_home().replace("\\", "/") + path[match.end():]
+    else:
+        match = HOME_PREFIX.match(path)
+        if match:
+            path = os.path.expanduser("~").replace("\\", "/") + path[match.end():]
+    if "$" in path or "`" in path or re.search(r"%\w+%", path):
+        return None
+    return os.path.expanduser(path)
+
+
+def control_label(path, base_dir, shown=None):
+    """What part of Codex's own configuration a path names, else None. Relative paths resolve against
+    base_dir; with base_dir None, or with an unknown variable in the path, only the text is judged.
+    `shown` is the spelling a message repeats (default: the path itself)."""
+    if not path:
+        return None
+    shown = shown or path
+    expanded = expand_known(path)
+    if expanded is None or (base_dir is None and not (os.path.isabs(expanded) or WINDOWS_ABSOLUTE.match(expanded))):
+        match = CONTROL_MENTION.search(path.replace("\\", "/"))
+        return "a Codex control file (%s)" % match.group(0) if match else None
+    if not (os.path.isabs(expanded) or WINDOWS_ABSOLUTE.match(expanded)):
+        expanded = os.path.join(base_dir, expanded)
+    candidates = {path_key(expanded).lower(), path_key(os.path.realpath(expanded)).lower()}
+    for candidate in candidates:
+        for root, kind in control_roots():
+            if candidate == root:
+                parts = []
+            elif candidate.startswith(root.rstrip(os.sep) + os.sep):
+                parts = candidate[len(root.rstrip(os.sep)) + 1:].split(os.sep)
+            else:
+                continue
+            if kind == "system":
+                return "the Codex system configuration (%s)" % shown
+            if not parts:
+                return "the Codex home folder (%s)" % shown
+            if parts[0] in CONTROL_FOLDERS:
+                return "Codex's %s/ folder (%s)" % (parts[0], shown)
+            if len(parts) == 1 and parts[0] in CONTROL_FILES:
+                return "Codex's %s (%s)" % (CONTROL_FILES[parts[0]], shown)
+            if len(parts) == 1 and parts[0].endswith(".config.toml"):
+                return "a Codex profile configuration (%s)" % shown
+    return None
+
+
+WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>", ">&")
+# Commands that change every file operand they get.
+WRITE_ANY = {
+    "tee", "rm", "rmdir", "unlink", "truncate", "touch", "chmod", "chown", "chgrp", "chattr", "shred",
+    "ed", "ex", "vi", "vim", "nvim", "nano", "emacs", "patch",
+}
+IN_PLACE_EDITORS = {"sed", "gsed", "perl", "ruby"}
+COPY_LIKE = {"cp", "install", "rsync", "scp", "ln", "link"}
+PS_WRITE_ANY = {
+    "set-content", "sc", "add-content", "ac", "out-file", "new-item", "ni", "remove-item", "ri", "rm",
+    "del", "erase", "rd", "rmdir", "rename-item", "ren", "rni", "move-item", "mi", "mv", "move",
+    "clear-content", "clc", "tee-object", "tee", "set-item", "si",
+}
+PS_COPY = {"copy-item", "cpi", "cp", "copy"}
+CMD_WRITE_ANY = {"del", "erase", "move", "ren", "rename", "rd", "rmdir"}
+CMD_COPY = {"copy", "xcopy", "robocopy"}
+PS_FILE_WRITE = re.compile(r"\[(?:System\.)?IO\.(?:File|Directory)\]::(?:Write|Append|Create|Delete|Copy|Move|Replace)", re.IGNORECASE)
+
+
+def plain_operands(args, option_start="-"):
+    return [word.value for word in args if word.value and not (len(word.value) > 1 and word.value.startswith(option_start))]
+
+
+def copy_destinations(args):
+    """What cp, install, rsync, scp and ln write: the destination, and the destination/<source name>."""
+    values = []
+    target_dir = None
+    k = 0
+    while k < len(args):
+        value = args[k].value
+        if value in ("-t", "--target-directory") and k + 1 < len(args):
+            target_dir = args[k + 1].value
+            k += 2
+            continue
+        if value.startswith("--target-directory="):
+            target_dir = value.split("=", 1)[1]
+        elif value and not (len(value) > 1 and value.startswith("-")):
+            values.append(value)
+        k += 1
+    if target_dir is not None:
+        destination, sources = target_dir, values
+    elif len(values) >= 2:
+        destination, sources = values[-1], values[:-1]
+    else:
+        return []
+    joined = destination.replace("\\", "/").rstrip("/") + "/"
+    return [destination] + [joined + source.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for source in sources]
+
+
+def output_files(args, flags):
+    """The file after an output option such as curl -o or wget -O (also at the end of a cluster)."""
+    found = []
+    for k, word in enumerate(args):
+        value = word.value
+        following = args[k + 1].value if k + 1 < len(args) else ""
+        if value in flags or (short_letters(value) and value[-1:] in {flag[1:] for flag in flags if len(flag) == 2}):
+            found.append(following)
+        else:
+            for flag in flags:
+                if flag.startswith("--") and value.startswith(flag + "="):
+                    found.append(value[len(flag) + 1:])
+    return found
+
+
+def written_paths(view, dialect):
+    """The paths a command writes, renames or deletes, as far as its own words tell."""
+    name, args = view.name, view.words[1:]
+    if dialect == POWERSHELL:
+        operands = plain_operands(args)
+        if name in PS_WRITE_ANY:
+            return operands
+        if name in PS_COPY:
+            destinations = operands[1:]
+            for k, word in enumerate(args[:-1]):
+                if word.value.lower().startswith("-d"):
+                    destinations.append(args[k + 1].value)
+            return destinations
+        return []
+    if dialect == CMD:
+        operands = plain_operands(args, "/")
+        if name in CMD_WRITE_ANY:
+            return operands
+        return operands[1:] if name in CMD_COPY else []
+    if name in WRITE_ANY:
+        return plain_operands(args)
+    if name in IN_PLACE_EDITORS and any(
+        word.value.startswith("--in-place") or "i" in short_letters(word.value) for word in args
+    ):
+        return plain_operands(args)
+    if name in COPY_LIKE:
+        return copy_destinations(args)
+    if name == "mv":
+        return plain_operands(args) + copy_destinations(args)
+    if name == "dd":
+        return [word.value[3:] for word in args if word.value.startswith("of=")]
+    if name == "curl":
+        return output_files(args, ("-o", "--output"))
+    if name == "wget":
+        return output_files(args, ("-O", "--output-document"))
+    return []
+
+
+def changed_directory(view, base_dir):
+    """The directory a `cd` or `Set-Location` moves to, or None when it cannot be known."""
+    operands = plain_operands(view.words[1:])
+    if not operands:
+        return os.path.expanduser("~")
+    expanded = expand_known(operands[0])
+    if expanded is None or operands[0] == "-":
+        return None
+    if os.path.isabs(expanded) or WINDOWS_ABSOLUTE.match(expanded):
+        return expanded
+    return os.path.join(base_dir, expanded) if base_dir else None
+
+
+def runs_inline_code(scripts):
+    """True when a command hands inline or stdin code to an interpreter (python -c, node -e, a heredoc)."""
+    for script in scripts:
+        for command in script.commands:
+            for view in command_views(command):
+                if interpreter_mode(view.name, view.words[1:]):
+                    return True
+                runner = later_view(view, script.dialect, INTERPRETER.match)
+                if runner and interpreter_mode(runner.name, runner.words[1:]) == "inline":
+                    return True
+    return False
+
+
+def control_write_reason(scripts, texts, base_dir):
+    """Block reason for a shell write into Codex's control files, else None."""
+    for script in scripts:
+        base = base_dir
+        for command in script.commands:
+            views = command_views(command)
+            if views and views[0].name in ("cd", "pushd", "chdir", "set-location", "sl"):
+                base = changed_directory(views[0], base)
+                continue
+            for op, target in command.redirects:
+                if op in WRITE_REDIRECTS and not (op == ">&" and (target.value.isdigit() or target.value == "-")):
+                    label = control_label(target.value, base)
+                    if label:
+                        return "this command writes into %s." % label + CONTROL_TAIL
+            for view in views:
+                for path in written_paths(view, script.dialect):
+                    label = control_label(path, base)
+                    if label:
+                        return "this command changes %s." % label + CONTROL_TAIL
+    inline = runs_inline_code(scripts)
+    for text in texts:
+        if inline or PS_FILE_WRITE.search(text):
+            match = CONTROL_MENTION.search(text.replace("\\", "/"))
+            if match:
+                return "this command runs code that names a Codex control file (%s)." % match.group(0) + CONTROL_TAIL
+    return None
+
+
+def codex_command_reason(command, dialect, base_dir):
+    """The Codex-only block reason for a shell command in one dialect, else None."""
+    text = command.replace("\\", "/") if dialect == POWERSHELL else command
+    scripts = all_scripts(parse(text, dialect)[0])
+    for script in scripts:
+        for item in script.commands:
+            for view in command_views(item):
+                reason = git_reason(view) or codex_escape_reason(view)
+                if reason:
+                    return reason
+    return control_write_reason(scripts, (text, normalized(text, dialect)), base_dir)
+
+
+# === Codex mode: apply_patch ====================================================================
+PATCH_PATH = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
+SHELL_STARTUP_FILES = {".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin"}
+
+
+def patch_paths(patch):
+    return [match.group(1).strip() for match in PATCH_PATH.finditer(patch) if match.group(1).strip()]
+
+
+def patch_reason(patch, base_dir):
+    """Block reason for an apply_patch edit of a protected path, else None."""
+    home = path_key(os.path.expanduser("~"))
+    for raw in patch_paths(patch):
+        expanded = expand_known(raw) or raw.replace("\\", "/")
+        absolute = expanded if os.path.isabs(expanded) or WINDOWS_ABSOLUTE.match(expanded) else os.path.join(base_dir, expanded)
+        normalized_path = absolute.replace("\\", "/")
+        name = normalized_path.rstrip("/").rsplit("/", 1)[-1]
+        if env_name_hard(name):
+            return (
+                "this patch would edit the protected env file %s, which holds secret values. Edit the "
+                "placeholder file (for example `.env.example`) and let the user fill the real one." % raw
+            )
+        label = secret_match(normalized_path.rstrip("/") + "/")
+        if label:
+            return "this patch would edit %s (%s), and the agent never touches credentials." % (raw, label)
+        if name.lower() in SHELL_STARTUP_FILES and path_key(os.path.dirname(normalized_path)) == home:
+            return (
+                "this patch would edit the shell startup file %s, which runs in every new shell; the "
+                "user makes such changes themselves." % raw
+            )
+        label = control_label(absolute, base_dir, raw)
+        if label:
+            return "this patch would edit %s." % label + CONTROL_TAIL
+    return None
+
+
+def configure(runtime):
+    """Switch the checks to one runtime; main() calls it once before evaluating."""
+    global RUNTIME, EXTRA_SECRET_PATTERNS
+    RUNTIME = runtime
+    EXTRA_SECRET_PATTERNS = codex_secret_patterns() if runtime == CODEX else []
+
+
+def on_windows():
+    """Codex on Windows sends PowerShell commands as tool `Bash`. A function so tests can patch it."""
+    return os.name == "nt"
+
+
 # === evaluation =================================================================================
 def check_command(command, shell, base_dir):
     """The block reason for a Bash or PowerShell command, else None."""
@@ -1136,8 +1800,18 @@ def check_command(command, shell, base_dir):
 
     for script in scripts:
         for item in script.commands:
-            if any(deletes_recursively(view, script.dialect) for view in command_views(item)):
+            views = command_views(item)
+            if any(deletes_recursively(view, script.dialect) for view in views):
                 return RM_MESSAGE
+            for view in views:
+                reason = git_alias_reason(view)
+                if reason:
+                    return reason
+    if runs_inline_code(scripts):
+        for candidate in (text, flat):
+            match = INLINE_RECURSIVE_DELETE.search(candidate)
+            if match:
+                return INLINE_RM_MESSAGE % match.group(0).split("(", 1)[0].strip()
 
     reason = read_reason(scripts, (text, flat))
     if reason:
@@ -1218,12 +1892,56 @@ def text_field(tool_input, key):
     return value if isinstance(value, str) else ""
 
 
+def codex_command_text(tool_input):
+    """The shell command of a Codex call: a string, or an argv list as older Codex shell tools sent it."""
+    command = tool_input.get("command")
+    if isinstance(command, list) and command and all(isinstance(part, str) for part in command):
+        if len(command) >= 3 and command_name(command[0]) in SHELLS and command[1] in ("-c", "-lc"):
+            return command[2]
+        return shlex.join(command)
+    return command if isinstance(command, str) else ""
+
+
+def codex_directory(data, tool_input):
+    """The directory a Codex shell command runs in: its workdir when the input names one (Codex 0.154
+    sends none), else the session directory."""
+    workdir = tool_input.get("workdir")
+    if isinstance(workdir, str) and os.path.isdir(workdir):
+        return workdir
+    return session_dir(data)
+
+
+def evaluate_codex(data, tool, tool_input):
+    """The verdict for a Codex Bash or apply_patch call; None to allow; False for another tool."""
+    if tool == "apply_patch":
+        patch = text_field(tool_input, "command")
+        reason = patch_reason(patch, session_dir(data)) if patch.strip() else None
+        return (reason, None) if reason else None
+    if tool != "Bash":
+        return False
+    command = codex_command_text(tool_input)
+    if not command.strip():
+        return None
+    base_dir = codex_directory(data, tool_input)
+    for shell in ("PowerShell", "Bash") if on_windows() else ("Bash",):
+        dialect = POWERSHELL if shell == "PowerShell" else BASH
+        reason = check_command(command, shell, base_dir) or codex_command_reason(command, dialect, base_dir)
+        if reason:
+            return (reason, command)
+    return None
+
+
 def evaluate(data):
     """(reason, blocked command or None) when the call must be blocked, else None."""
     tool = data.get("tool_name")
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
+
+    if RUNTIME == CODEX:
+        verdict = evaluate_codex(data, tool, tool_input)
+        if verdict is not False:
+            return verdict
 
     if tool in ("Bash", "PowerShell"):
         command = text_field(tool_input, "command")
@@ -1259,7 +1977,17 @@ def write_stderr(text):
     sys.stderr.flush()
 
 
-def main():
+def runtime_from(argv):
+    """`--runtime codex` or `--runtime=codex` selects Codex mode; anything else is the Claude default."""
+    for index, value in enumerate(argv):
+        if value == "--runtime" and index + 1 < len(argv):
+            return CODEX if argv[index + 1].lower() == CODEX else CLAUDE
+        if value.startswith("--runtime="):
+            return CODEX if value.split("=", 1)[1].lower() == CODEX else CLAUDE
+    return CLAUDE
+
+
+def main(argv=None):
     raw = sys.stdin.buffer.read().decode("utf-8", "replace")
     try:
         data = json.loads(raw)
@@ -1272,6 +2000,7 @@ def main():
         return 0
 
     try:
+        configure(runtime_from(sys.argv[1:] if argv is None else argv))
         verdict = evaluate(data)
     except Exception as error:
         # Deliberate fail-closed: this is a real tool call the check could not evaluate, and a

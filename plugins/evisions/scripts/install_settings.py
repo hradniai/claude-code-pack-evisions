@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Merge the evisions settings baseline into the user's Claude Code settings.json, check it, undo it.
 
-A plugin cannot ship permission rules, the bypass-mode lock, a status line, env variables or other
-settings keys: a plugin's own settings.json honours only `agent` and `subagentStatusLine`. This script
-merges those keys from settings/baseline.json into the user's settings file instead
+A plugin cannot ship permission rules, a status line, env variables or other settings keys: a
+plugin's own settings.json honours only `agent` and `subagentStatusLine`. This script merges those
+keys from settings/baseline.json into the user's settings file instead
 ($CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json). bin/evisions-settings runs it.
 
 Modes:
@@ -12,12 +12,15 @@ Modes:
   --apply --restore-declined
               the same, and also bring back baseline items the user removed
   --remove    undo exactly what earlier applies added, using the record
-  --check     exit 0 when everything the record lists is still in place, else exit 1
+  --check     check the whole settings file (errors and warnings, one line each), then whether
+              everything the record lists is still in place; exit 1 on an error or a missing item
 
-Profiles: `standard` merges permission rules, the bypass-mode lock and the env variables. `managed`
-(an administrator policy file exists) leaves permissions, bypass mode and the environment to the
-administrator and merges only the plain settings and the status line. Scalars and env variables are written only when the
-user has no value, and the user's own list entries are never touched or removed.
+Profiles: `standard` merges permission rules and the env variables. `managed` (an administrator
+policy file exists) leaves permissions and the environment to the administrator and merges only the
+plain settings and the status line. Scalars and env variables are written only when the user has no
+value, and the user's own list entries are never touched or removed. Neither profile touches bypass
+mode: the permissions.disableBypassPermissionsMode lock that version 1.1.0 wrote is taken back by the
+next --apply, but only while it still holds the value the installer wrote and the record lists it.
 
 The record at <config-dir>/evisions/settings-applied.json lists exactly what this script added, so
 --remove and upgrades take back only that. Its path is a contract: the plugin's SessionStart hook
@@ -67,6 +70,8 @@ STANDARD = "standard"
 MANAGED = "managed"
 LISTS = ("allow", "deny", "ask")
 LIST_KEYS = tuple(f"permissions.{name}" for name in LISTS)
+# The bypass-mode lock. The shipped baseline no longer sets it (1.2.0); the installer still accepts it
+# in a record and in an older baseline file, so an upgrade can take back the lock 1.1.0 wrote.
 BYPASS_KEY = "permissions.disableBypassPermissionsMode"
 STATUSLINE_KEY = "statusLine"
 
@@ -79,8 +84,20 @@ LINUX_MANAGED_DIR = "/etc/claude-code"
 
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+# The tool names the official settings schema accepts in a permission rule, copied from the pattern of
+# $defs.permissionRule in https://json.schemastore.org/claude-code-settings.json (2026-09). Editors that
+# validate settings.json against that schema (VS Code and others) flag any other rule as an error, even
+# one Claude Code itself loads, so --check reports such a rule as a warning.
+SCHEMA_TOOL_NAMES = (
+    "Agent", "Artifact", "Bash", "Cd", "Edit", "EnterWorktree", "ExitPlanMode", "Glob", "Grep", "KillShell",
+    "LSP", "Monitor", "MultiEdit", "NotebookEdit", "PowerShell", "Read", "ShareOnboardingGuide", "Skill",
+    "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch",
+    "WebFetch", "WebSearch", "Workflow", "Write",
+)
+SCHEMA_RULE = re.compile(r"^((" + "|".join(SCHEMA_TOOL_NAMES) + r")(\([^)]+\))?|mcp__.*)$")
 # Older Claude Code versions skip a whole settings file that holds "attribution": false.
 NEVER_WRITE = {"attribution"}
+# bypassLock is read only from a baseline file of version 1.1.0 or older; 1.2.0 ships none.
 BASELINE_SECTIONS = ("permissions", "bypassLock", "settings", "env")
 
 
@@ -268,7 +285,7 @@ def rule_problem(rule: object) -> Optional[str]:
         return "contains '|'; rules are matched per subcommand, so it would never match"
     tool, parenthesis, rest = rule.partition("(")
     if "*" in tool:
-        return "has a wildcard in the tool name, which Claude Code skips at load"
+        return "has a wildcard in the tool name, which Claude Code skips in an allow rule and the settings schema rejects"
     if not TOOL_NAME.match(tool):
         return "does not start with a tool name"
     if parenthesis and not rest.endswith(")"):
@@ -418,26 +435,184 @@ def load_settings(path: Path) -> tuple:
     return data, True
 
 
-def user_value_warnings(data: dict) -> list:
-    """Known values in the user's own file that make Claude Code ignore the whole file."""
-    warnings = []
+ERROR = "Error"
+WARNING = "Warning"
+
+
+def value_findings(data: dict) -> list:
+    """(severity, text) for known values in the user's own file that Claude Code rejects.
+
+    An error makes Claude Code ignore the whole file (measured: its deny rules no longer load); the
+    attribution warning concerns versions older than 2.1.281 only, which skip such a file.
+    """
+    findings = []
     if "cleanupPeriodDays" in data and not KNOWN_SETTINGS["cleanupPeriodDays"][1](data["cleanupPeriodDays"]):
-        warnings.append(
+        findings.append((ERROR,
             f"Your file sets cleanupPeriodDays to {show(data['cleanupPeriodDays'])}. Claude Code accepts only a "
             "whole number of 1 or more and otherwise ignores the entire settings file, these rules included. "
             "Change it (3650 keeps transcripts for ten years)."
-        )
+        ))
     if "feedbackSurveyRate" in data and not KNOWN_SETTINGS["feedbackSurveyRate"][1](data["feedbackSurveyRate"]):
-        warnings.append(
+        findings.append((ERROR,
             f"Your file sets feedbackSurveyRate to {show(data['feedbackSurveyRate'])}. Claude Code accepts only a "
             "number from 0 to 1 and otherwise ignores the entire settings file. Change it."
-        )
+        ))
     if data.get("attribution") is False:
-        warnings.append(
+        findings.append((WARNING,
             'Your file sets "attribution" to false. Claude Code versions older than 2.1.281 skip a settings '
             "file that holds this value. If you use an older version anywhere, use the object form instead."
+        ))
+    return findings
+
+
+def user_value_warnings(data: dict) -> list:
+    """The value findings as plain sentences, for the notes a dry run and an apply print."""
+    return [text for _, text in value_findings(data)]
+
+
+def allow_glob_is_anchored(tool: str) -> bool:
+    """True when a wildcard in an allow rule's tool name follows a literal mcp__<server>__ prefix."""
+    head = tool.split("*", 1)[0]
+    return head.startswith("mcp__") and "__" in head[len("mcp__"):]
+
+
+def rule_finding(name: str, rule: object) -> Optional[tuple]:
+    """(severity, text) for one rule of the user's permissions.<name> list, or None when it is fine.
+
+    Errors are rules Claude Code skips (measured on 2.1.282: `claude doctor` lists them as invalid);
+    warnings are rules it loads that do not work as written, or that editors validating settings.json
+    against the official schema flag. At most one finding per rule, the most serious first.
+    """
+    label = f"permissions.{name} rule {show(rule)}"
+    if not isinstance(rule, str) or not rule.strip():
+        return ERROR, f"{label} is not a non-empty text; Claude Code skips it."
+    tool, parenthesis, rest = rule.strip().partition("(")
+    if parenthesis and not rest.endswith(")"):
+        return ERROR, f"{label} has text after the closing parenthesis; Claude Code skips a malformed rule."
+    if parenthesis and rest == ")":
+        return ERROR, f"{label} has empty parentheses; Claude Code skips it. Write the bare tool name instead."
+    if rule != rule.strip():
+        return WARNING, f"{label} has leading or trailing spaces, so it matches no tool. Remove the spaces."
+    if "|" in rule:
+        return WARNING, (
+            f"{label} contains '|'. Claude Code matches rules per subcommand, so this rule never matches; "
+            "write one rule per command."
         )
-    return warnings
+    if name == "allow" and "*" in tool and not allow_glob_is_anchored(tool):
+        return WARNING, (
+            f"{label} has a wildcard in the tool name. Claude Code skips such an allow rule, so it approves "
+            "nothing (only mcp__<server>__* style names may use one)."
+        )
+    if name != "allow" and tool == "Write" and parenthesis:
+        return WARNING, (
+            f"{label} is never matched: file permission checks use Edit(path) rules only. "
+            f"Use {show('Edit(' + rest)} instead, which covers every file-editing tool."
+        )
+    if not SCHEMA_RULE.match(rule):
+        if tool in SCHEMA_TOOL_NAMES or tool.startswith("mcp__"):
+            reason = "the part in parentheses holds a ')' the official settings schema does not allow"
+        else:
+            reason = f"{show(tool)} is not a tool name the official settings schema lists"
+        return WARNING, (
+            f"{label}: {reason}, so editors that check settings.json against that schema (VS Code and others) "
+            "may flag it as an error. Claude Code itself loads the rule; check the spelling, or remove the rule "
+            "if you do not need it."
+        )
+    return None
+
+
+class SettingsReport:
+    """The result of checking the whole settings file: data is None when it is not a JSON object."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.existed = path.exists()
+        self.data: Optional[dict] = None
+        self.findings: list = []
+
+    def count(self, severity: str) -> int:
+        return sum(1 for found, _ in self.findings if found == severity)
+
+
+def check_settings_file(path: Path) -> SettingsReport:
+    """Check the whole settings file, not only the baseline's entries, and never raise for its content."""
+    report = SettingsReport(path)
+    if not report.existed:
+        report.data = {}
+        return report
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        report.findings.append((ERROR, "The file is not UTF-8 text, so Claude Code cannot read it."))
+        return report
+    except OSError as error:
+        report.findings.append((ERROR, f"The file cannot be read: {error.strerror or error}."))
+        return report
+    if not text.strip():
+        report.data = {}
+        return report
+    try:
+        data = json.loads(text, parse_constant=reject_constant)
+    except json.JSONDecodeError as error:
+        report.findings.append((ERROR,
+            f"The file is not valid JSON (line {error.lineno}, column {error.colno}: {error.msg}). "
+            "Claude Code ignores the whole file."
+        ))
+        return report
+    except ValueError as error:
+        report.findings.append((ERROR, f"The file is not valid JSON ({error}). Claude Code ignores the whole file."))
+        return report
+    if not isinstance(data, dict):
+        report.findings.append((ERROR,
+            f"The file holds {describe_type(data)} at the top level, where Claude Code expects an object "
+            "({ ... }). Claude Code ignores the whole file."
+        ))
+        return report
+    report.data = data
+    permissions = data.get("permissions", {})
+    if not isinstance(permissions, dict):
+        report.findings.append((ERROR,
+            f'"permissions" is {describe_type(permissions)}, where Claude Code expects an object. '
+            "Claude Code probably ignores the whole file."
+        ))
+        permissions = {}
+    for name in LISTS:
+        rules = permissions.get(name, [])
+        if not isinstance(rules, list):
+            report.findings.append((ERROR,
+                f'"permissions.{name}" is {describe_type(rules)}, where Claude Code expects a list. '
+                "Claude Code probably ignores the whole file."
+            ))
+            continue
+        for rule in rules:
+            finding = rule_finding(name, rule)
+            if finding:
+                report.findings.append(finding)
+    if "env" in data and not isinstance(data["env"], dict):
+        report.findings.append((ERROR,
+            f'"env" is {describe_type(data["env"])}, where Claude Code expects an object. '
+            "Claude Code probably ignores the whole file."
+        ))
+    report.findings += value_findings(data)
+    return report
+
+
+def settings_report_lines(report: SettingsReport) -> list:
+    lines = [f"Settings file: {report.path}"]
+    if not report.existed:
+        lines.append("  It does not exist yet, so there is nothing in it to check.")
+        return lines
+    lines += [f"  {severity}: {text}" for severity, text in report.findings]
+    errors, warnings = report.count(ERROR), report.count(WARNING)
+    if not report.findings:
+        lines.append("Settings file check: no problems found.")
+    else:
+        lines.append(
+            f"Settings file check: {plural(errors, 'error')}, {plural(warnings, 'warning')}. "
+            "An error makes Claude Code ignore the file or skip a value or rule; a warning does not stop it "
+            "from loading."
+        )
+    return lines
 
 
 def default_managed_dir() -> Path:
@@ -832,6 +1007,11 @@ def scalar_lines(entries: list, env: bool) -> list:
 def unset_line(key: str, value: object) -> str:
     if key == STATUSLINE_KEY:
         return "  statusLine (the evisions status line)"
+    if key == BYPASS_KEY:
+        return (
+            f"  {key} = {show(value)} (the bypass-mode lock an earlier version set; after a restart, "
+            "--dangerously-skip-permissions skips the questions again)"
+        )
     return f"  {key} = {show(value)}"
 
 
@@ -854,19 +1034,11 @@ def describe_plan(plan: Plan, profile: str, done: bool) -> list:
         )
     if profile == MANAGED:
         lines.append(
-            "Permission rules, bypass mode and environment variables: the administrator's policy owns "
-            "permissions and bypass mode, and the administrator's environment owns telemetry; the installer "
-            "leaves them alone."
+            "Permission rules and environment variables: the administrator's policy owns permissions, and "
+            "the administrator's environment owns telemetry; the installer leaves them alone."
         )
 
-    bypass_set = [value for key, value in plan.set_keys if key == BYPASS_KEY]
-    if bypass_set:
-        lines.append(
-            f"Bypass mode: permissions.disableBypassPermissionsMode {'set' if done else 'will be set'} to "
-            f"{show(bypass_set[0])}. A session started with --dangerously-skip-permissions then runs in the "
-            "normal ask-first mode."
-        )
-    plain = [(key, value) for key, value in plan.set_keys if key not in (BYPASS_KEY, STATUSLINE_KEY)]
+    plain = [(key, value) for key, value in plan.set_keys if key != STATUSLINE_KEY]
     settings = scalar_lines(plain, env=False)
     if settings:
         lines.append("Settings set:" if done else "Settings to set:")
@@ -1161,7 +1333,15 @@ def run_remove(args: argparse.Namespace) -> int:
 
 
 def run_check(args: argparse.Namespace) -> int:
+    """The whole settings file first (exit 1 on any error, warnings allowed), then the baseline."""
     context = Context(args)
+    report = check_settings_file(context.settings_path)
+    print_lines(settings_report_lines(report) + [""])
+    file_ok = report.count(ERROR) == 0
+    if report.data is None:
+        print("The evisions baseline cannot be checked until the settings file is valid JSON.")
+        return 1
+    data = report.data
     record = load_record(context.record_path)
     if record is None:
         print(f"The evisions baseline is not installed: there is no record at {context.record_path}. Run {PROGRAM} --apply.")
@@ -1169,7 +1349,6 @@ def run_check(args: argparse.Namespace) -> int:
     if record["pending"]:
         print(f"The last {PROGRAM} --apply stopped before it finished. Run {PROGRAM} --apply to complete it.")
         return 1
-    data, _ = load_settings(context.settings_path)
     missing = []
     for key in LIST_KEYS:
         current = get_path(data, key)
@@ -1212,6 +1391,9 @@ def run_check(args: argparse.Namespace) -> int:
         print_lines(note)
     if context.version != version:
         print(f"The plugin is now version {context.version}; run {PROGRAM} --apply to bring the settings up to date.")
+    if not file_ok:
+        print("The settings file has errors (listed above); fix them, then run this check again.")
+        return 1
     return 0
 
 
@@ -1227,7 +1409,11 @@ def parse_args(argv: list) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="write the changes (a backup is made first)")
     mode.add_argument("--remove", action="store_true", help="undo what earlier --apply runs added")
-    mode.add_argument("--check", action="store_true", help="exit 0 when the baseline is installed and intact")
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="check the whole settings file and whether the baseline is intact; exit 1 on an error",
+    )
     parser.add_argument(
         "--restore-declined",
         action="store_true",

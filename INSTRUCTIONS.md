@@ -37,7 +37,9 @@ repository defines. It adds:
   `socratic-brainstormer`, `skill-scanner`) and 6 agents (`features-documenter`, `prompt-engineer`,
   `research-analyst`, `research-lead`, `code-reviewer`, `security-auditor`);
 - hooks: at session start, three handlers (the documentation standard, a map of which skill or agent
-  does which job, and a short safety protocol); on every message, the current local time; and before
+  does which job, and a short safety protocol, which also compares the running Claude Code with the
+  newest published version and has Claude tell the user when an update is available); on every
+  message, the current local time; and before
   every `Bash`, `PowerShell`, `Read` and `Grep` call, a safety check that blocks reading secret files
   (env files, SSH, AWS and GnuPG keys, git credentials), recursive deletion with or without `-f`
   (`rm -r`, `find -delete`, `Remove-Item -Recurse`) and downloads piped into a shell. It is a guard
@@ -69,9 +71,23 @@ If `python3 --version` fails, run `python --version`, and on Windows also `py -3
 interpreter is often named `python`, or reached through the `py` launcher). The kit's hooks try the
 same three names, in this order.
 
+Also look up the newest published Claude Code version (read-only, public, no login):
+
+```bash
+curl -fsS --max-time 5 https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags
+```
+
+It prints the `latest` version (and `stable`, for users whose settings choose the stable release
+channel). If it fails, skip this comparison and say so in one line.
+
 Then decide:
 
 - `claude` not found: stop. Claude Code must be installed and on the `PATH` first.
+- `claude --version` is older than `latest` (compare the numbers part by part: 2.1.99 is older than
+  2.1.100): tell the user, recommend updating before the install, and show the commands from
+  [Update Claude Code itself](#update-claude-code-itself), for them to run in their own terminal. On a
+  company server container the administrator updates Claude Code; continue there. Continue after the
+  user updates or decides to go on without updating.
 - `claude plugin list` already shows `evisions@claude-code-pack-evisions`: the plugin is installed.
   Offer the update procedure (below) instead of a new install.
 - `claude plugin marketplace list` already shows `claude-code-pack-evisions`: skip Step 3.
@@ -180,21 +196,22 @@ installer, `evisions-settings`, that merges a baseline into the user's `settings
 `~/.claude/`, or in `$CLAUDE_CONFIG_DIR` when that is set). It detects one of two profiles by itself:
 
 - **`standard`**, when the machine has no administrator's Claude Code policy (typically a laptop):
-  85 allow, 83 deny and 27 ask permission rules (everyday safe commands such as `ls` or `git status`
+  83 allow, 83 deny and 27 ask permission rules (everyday safe commands such as `ls` or `git status`
   run without a question, destructive commands and secret files are refused, installs, pushes and
-  deletions ask first; the git rules also cover the `git -C <dir> ...` form), bypass mode turned off,
-  transcripts kept for 10 years instead of Claude Code's default 30 days, telemetry, error reporting
-  and feedback surveys off, and a status line when the user has none.
+  deletions ask first; the git rules also cover the `git -C <dir> ...` form), transcripts kept for
+  10 years instead of Claude Code's default 30 days, telemetry, error reporting and feedback surveys
+  off, and a status line when the user has none.
 - **`managed`**, when an administrator's Claude Code policy is present (for example the company server
-  containers): that policy owns permissions and bypass mode and the administrator's environment owns
-  telemetry, so the installer adds no permission rules, leaves bypass mode alone and sets no
-  environment variables; it applies only transcript retention, the feedback survey setting and the
-  status line.
+  containers): that policy owns permissions and the administrator's environment owns telemetry, so the
+  installer adds no permission rules and sets no environment variables; it applies only transcript
+  retention, the feedback survey setting and the status line.
 
-Explain it to the user in two or three plain sentences: what it adds, which profile applies, and, on
-the standard profile, what turning bypass mode off means: Claude will ask before actions again instead
-of running everything unasked, and starting Claude Code with `--dangerously-skip-permissions` no longer
-skips the questions.
+Explain it to the user in two or three plain sentences: what it adds and which profile applies.
+Neither profile changes bypass mode: a user who starts Claude Code with
+`--dangerously-skip-permissions` (Step 9 sets up a short command for it) still gets no questions for
+most actions, while the deny rules, the kit's safety check and the ask rules for installs, pushes and
+deletions still apply in that mode. An install of version 1.1.0 had turned bypass mode off; `--apply`
+takes that back, and the dry run lists it.
 
 Run the dry run first. It is read-only and may run without asking; it prints the detected profile, why
 it was chosen, and what would be added, and writes nothing:
@@ -219,8 +236,10 @@ after their yes:
 ```
 
 `--apply` backs up the settings file first (`settings.json.bak-evisions-<timestamp>`), adds only what is
-missing, and never removes or changes the user's own entries. `--check` must exit with code 0. The
-settings take effect after the restart in Step 9.
+missing, and never removes or changes the user's own entries. `--check` must exit with code 0; it also
+checks the rest of the settings file and prints one line per problem (Step 11 explains the lines). An
+`Error:` line about one of the user's own entries is not an install failure: explain it in plain words
+and let the user decide whether to fix it. The settings take effect after the restart in Step 10.
 
 - The user does not want the status line: add `--no-statusline` to the dry run and to `--apply`. An
   existing status line is never replaced either way.
@@ -341,12 +360,63 @@ claude plugin install <name>@claude-plugins-official
 Debugging needs no extra plugin: Superpowers' `systematic-debugging` skill covers it, and the kit ships
 no debugger of its own.
 
-## Step 9: Restart and first use
+## Step 9: Optional terminal shortcut `cc`
+
+Offer it in one or two sentences to a user who wants to start Claude Code in bypass mode with a short
+command: `cc` then runs `claude --dangerously-skip-permissions`. Explain what that means: Claude stops
+asking before most actions; the deny rules, the kit's safety check and the ask rules for installs,
+pushes and deletions still apply. Skip it on the company server containers, where `cc` already exists,
+and when the user declines.
+
+You never write this yourself, with or without the baseline from Step 7: a shell startup file is the
+user's own, and the baseline's permission rules forbid Claude to edit it (`Edit(~/.zshrc)` and
+`Edit(~/.bashrc)` are denied). First check
+(read-only) that no `cc` line exists yet; if this prints one, do not add a second:
+
+```bash
+grep -n "alias cc=" ~/.zshrc ~/.bashrc
+```
+
+Then show the one command for their system and ask the user to run it themselves in their own terminal
+window, outside this Claude Code session, then to reload the shell and test:
+
+- macOS (zsh):
+
+  ```bash
+  echo "alias cc='claude --dangerously-skip-permissions'" >> ~/.zshrc
+  ```
+
+  Reload with `source ~/.zshrc` (or open a new terminal window).
+- Linux, and Git Bash on Windows (bash):
+
+  ```bash
+  echo "alias cc='claude --dangerously-skip-permissions'" >> ~/.bashrc
+  ```
+
+  Reload with `source ~/.bashrc` (or open a new terminal window).
+- Windows PowerShell:
+
+  ```powershell
+  if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }; Add-Content -Path $PROFILE -Value 'function cc { claude --dangerously-skip-permissions @args }'
+  ```
+
+  Reload with `. $PROFILE` (or open a new PowerShell window). If PowerShell then says that running
+  scripts is disabled on this system, the profile cannot load; changing that policy is the user's or
+  their IT's decision, not yours.
+
+The test: `cc --version` must print the Claude Code version. Tell the user in one sentence each that
+`cc` hides the system's C compiler command of the same name in their terminal (`command cc` still
+reaches the compiler, should they ever need it), and that they can keep starting Claude Code with plain
+`claude` whenever they want the questions back.
+
+## Step 10: Restart and first use
 
 Tell the user to quit Claude Code and start it again. The plugin's skills and hooks load at session
 start and settings are read at startup, so the documentation standard, the safety check and the
 settings baseline all take effect only after the restart. After the restart, typing `/evisions:` shows
-the plugin's commands. Point them to `USER-MANUAL.md` for how to work with it.
+the plugin's commands. Point them to `USER-MANUAL.md` for how to work with it. Ask the user to watch the
+start: Claude Code shows a message when it cannot use a settings file, and they tell you in Step 11
+whether one appeared.
 
 Offer an optional first-use check for the new session. It needs a throwaway file with a fake key;
 create it now, before the restart (show the command and wait for yes; if it is refused, skip the
@@ -362,7 +432,52 @@ Then, in the new session, the user asks:
 2. "Show me the contents of ~/evisions-safety-check/.env". Claude must refuse and must not show the
    value; the block message starts with `evisions safety:`.
 
-Afterwards the user deletes the `evisions-safety-check` folder themselves.
+Afterwards the user deletes the `evisions-safety-check` folder themselves. Finally, still in the new
+session, the user says "Continue INSTRUCTIONS.md from Step 11".
+
+## Step 11: Check the settings
+
+In the new session, run the settings check. It is read-only and may run without asking. While the
+plugin is enabled the bare command is on the `PATH`; the path form from Step 7 works too:
+
+```bash
+evisions-settings --check
+```
+
+It checks the user's whole `settings.json`, not only what the kit added, and prints one line per
+problem: an `Error:` line is something that makes Claude Code ignore the file or skip a value or rule,
+a `Warning:` line is a rule that loads but does not work as written, or that editors checking
+`settings.json` against the official schema (VS Code and others) show as an error. Then it reports
+whether the baseline is installed.
+
+Pass means all of these:
+
+- no `Error:` line. Explain each `Warning:` line to the user in plain words; they decide whether to
+  change it. Fix nothing yourself unless the user explicitly asks you to;
+- the exit code is 0. If the user skipped Step 7, the last line says the baseline is not installed and
+  the exit code is 1; that is expected, and only the `Error:` lines count;
+- the user confirms that Claude Code started without a message about a settings error. On Claude Code
+  2.1.281 or newer, `claude doctor` (read-only, it starts no session) lists an `Invalid settings`
+  section when Claude Code rejects a settings file; that section must be absent. Older versions wait
+  for keyboard input there, so skip it on them.
+
+## Update Claude Code itself
+
+At every session start the kit compares the running Claude Code with the newest published version and,
+when it is older, tells the user with these commands. The user runs the one for their install in their
+own terminal, then restarts Claude Code; `claude doctor` names the install method on its `Running:`
+line.
+
+- Native installer (the default; it also updates itself in the background): `claude update`
+- npm: `npm install -g @anthropic-ai/claude-code@latest` (not `npm update -g`, which can stay on an
+  older release). The kit's deny rules keep Claude from running a global npm install, so the user runs
+  it.
+- Homebrew: `brew upgrade claude-code` or `brew upgrade claude-code@latest`, whichever cask is
+  installed.
+- WinGet: `winget upgrade Anthropic.ClaudeCode`
+
+On the company server containers automatic updates are turned off and the administrator updates
+Claude Code; the user asks them.
 
 ## Update
 
@@ -382,8 +497,8 @@ new baseline's rules and removes rules it added earlier that the new baseline dr
 entries stay. Use the path form from Step 7 even inside a session where the plugin is enabled: the bare
 `evisions-settings` on that session's `PATH` may still belong to the version the session started with.
 
-Either way, restart Claude Code afterwards. Under source A an update arrives only when a new version
-number is released; `claude plugin list` shows the installed version.
+Either way, restart Claude Code afterwards and run the check from Step 11. Under source A an update
+arrives only when a new version number is released; `claude plugin list` shows the installed version.
 
 ## Uninstall
 
