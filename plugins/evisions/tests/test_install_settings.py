@@ -23,6 +23,7 @@ BASELINE = PLUGIN_ROOT / "settings" / "baseline.json"
 MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 RECORD = Path("evisions") / "settings-applied.json"
 COPIED_SCRIPT = Path("evisions") / "statusline.py"
+STATUSLINE_CACHE = Path("evisions") / "statusline-cache"
 
 
 def load(path):
@@ -159,7 +160,7 @@ class ApplyTest(InstallerTestCase):
         script = (self.config / COPIED_SCRIPT).as_posix()
         self.assertEqual(
             data["statusLine"]["command"],
-            f'python3 "{script}" 2>/dev/null || python "{script}" 2>/dev/null || py -3 "{script}"',
+            f'python3 -S "{script}" 2>/dev/null || python -S "{script}" 2>/dev/null || py -3 -S "{script}"',
         )
         self.assertEqual((self.config / COPIED_SCRIPT).read_bytes(), (PLUGIN_ROOT / "scripts" / "statusline.py").read_bytes())
         self.assertEqual(self.backups(), [])
@@ -388,6 +389,30 @@ class ExistingValuesTest(InstallerTestCase):
         self.assertNotIn("statusLine", self.data())
         self.assertFalse((self.config / COPIED_SCRIPT).exists())
 
+    def test_no_statusline_later_deletes_the_cache_with_the_script(self):
+        self.ok("--apply")
+        cache = self.config / STATUSLINE_CACHE
+        cache.mkdir()
+        (cache / "session.json").write_text("{}", encoding="utf-8")
+        result = self.ok("--apply", "--no-statusline")
+        self.assertIn("Deleted the status line's cache", result.stdout)
+        self.assertFalse(cache.exists())
+        self.assertTrue((self.config / RECORD).exists())
+
+    def test_statusline_command_from_an_earlier_version_is_updated(self):
+        self.ok("--apply")
+        script = (self.config / COPIED_SCRIPT).as_posix()
+        earlier = {"type": "command", "command": f'python3 "{script}" 2>/dev/null || python "{script}" 2>/dev/null || py -3 "{script}"'}
+        data = self.data()
+        data["statusLine"] = earlier
+        self.write_settings(data)
+        record = load(self.config / RECORD)
+        record["set"]["statusLine"] = earlier
+        (self.config / RECORD).write_text(json.dumps(record), encoding="utf-8")
+        result = self.ok("--apply")
+        self.assertIn("Status line: updated", result.stdout)
+        self.assertIn('python3 -S "', self.data()["statusLine"]["command"])
+
     def test_invalid_user_value_is_warned_about(self):
         self.write_settings({"cleanupPeriodDays": 0})
         result = self.ok()
@@ -418,6 +443,29 @@ class RemoveTest(InstallerTestCase):
         self.assertFalse((self.config / COPIED_SCRIPT).exists())
         self.assertFalse((self.config / "evisions").exists())
         self.assertEqual(len(self.backups()), 2)
+
+    def test_remove_deletes_the_status_line_cache(self):
+        self.ok("--apply")
+        cache = self.config / STATUSLINE_CACHE
+        cache.mkdir()
+        (cache / "session.json").write_text("{}", encoding="utf-8")
+        (cache / "session.json.123.tmp").write_text("{", encoding="utf-8")
+        result = self.ok("--remove")
+        self.assertIn("Deleted the status line's cache", result.stdout)
+        self.assertFalse((self.config / "evisions").exists())
+
+    def test_remove_keeps_script_and_cache_while_the_status_line_runs_them(self):
+        self.ok("--apply")
+        cache = self.config / STATUSLINE_CACHE
+        cache.mkdir()
+        (cache / "session.json").write_text("{}", encoding="utf-8")
+        data = self.data()
+        data["statusLine"]["padding"] = 1  # the user's own edit: the value is theirs from now on
+        self.write_settings(data)
+        result = self.ok("--remove")
+        self.assertIn("because your status line still runs it", result.stdout)
+        self.assertTrue((self.config / COPIED_SCRIPT).exists())
+        self.assertTrue((cache / "session.json").exists())
 
     def test_remove_keeps_what_the_user_added_after_apply(self):
         user = {"permissions": {"deny": ["Bash(bar *)"]}}

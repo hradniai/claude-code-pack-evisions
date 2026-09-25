@@ -174,6 +174,8 @@ backups next to the settings file as `settings.json.bak-evisions-<timestamp>`, m
 to an existing file; the record of what it added in `evisions/settings-applied.json`, which `--check`,
 `--remove` and later applies read and the safety protocol tests for; and a copy of the status line
 script in `evisions/statusline.py`, so the status line does not depend on where the plugin is installed.
+The script keeps a small per-session cache in `evisions/statusline-cache/` (files untouched for two
+weeks are pruned); `--remove` deletes it together with the script.
 
 The profile is detected automatically, from whether an administrator policy file
 (`managed-settings.json`, or files in `managed-settings.d/`) exists in Claude Code's policy folder for
@@ -187,9 +189,8 @@ the platform:
   `git -C . reset --hard` (measured on Claude Code 2.1.281). Keeps transcripts for 10 years
   (`cleanupPeriodDays: 3650`; Claude Code's default is 30 days, after which `/resume` loses older
   sessions). Turns off telemetry and error reporting
-  (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) and feedback surveys. Sets a three-line status line
-  (model, project and git branch, how full the context is, 5-hour and 7-day usage) when the user has
-  none.
+  (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) and feedback surveys. Sets the kit's status line
+  (described below) when the user has none.
 - **`managed`**: the machine has an administrator's Claude Code policy, for example the company server
   containers. That policy owns permissions, and the administrator's environment owns telemetry, so the
   installer adds no permission rules and sets no environment variables; it applies only transcript
@@ -212,6 +213,13 @@ their settings. The installer treats any baseline item the user removes (a setti
 their choice: later applies leave it out and list it as declined, and
 `evisions-settings --apply --restore-declined` brings such items back. Settings take effect after
 Claude Code restarts.
+
+**The status line.** It shows the model and effort, the project and git branch, how full the context is,
+5-hour and 7-day usage with their reset times, and the session's cost, tokens (subagents included), turns
+and time. It adapts to the width of the terminal, which Claude Code passes in `COLUMNS`: a wide window
+gets two lines, a narrow one, such as a phone over SSH, gets up to five shorter lines with the model,
+context and usage limits first, and only the least important fields are left out when five lines are not
+enough.
 
 ## Claude Code version check
 
